@@ -1,11 +1,61 @@
+use rustyms::error::Context;
 use rustyms::error::CustomError;
-use rustyms::fragment::Position;
+use rustyms::fragment::FragmentType;
 use rustyms::model::Location;
 use rustyms::spectrum::MassMode;
 use rustyms::system::{e, f64::MassOverCharge, mass_over_charge::mz, Charge};
 use rustyms::LinearPeptide;
 use rustyms::Model;
-use rustyms::*;
+use serde::Serialize;
+use std::fmt::Display;
+
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SafePosition {
+    pub series_id: u8,
+    pub series_number: u32,
+}
+
+impl Serialize for SafePosition {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&format!("{}", self))
+    }
+}
+
+impl SafePosition {
+    fn new(x: FragmentType) -> Result<Self, CustomError> {
+        let (series_id, series_number) = match x {
+            FragmentType::a(position) => ('a' as u8, position.series_number as u32),
+            FragmentType::b(position) => ('b' as u8, position.series_number as u32),
+            FragmentType::c(position) => ('c' as u8, position.series_number as u32),
+            FragmentType::d(position) => ('d' as u8, position.series_number as u32),
+            FragmentType::x(position) => ('x' as u8, position.series_number as u32),
+            FragmentType::y(position) => ('y' as u8, position.series_number as u32),
+            FragmentType::z(position) => ('z' as u8, position.series_number as u32),
+            FragmentType::precursor => (0, 0),
+            _ => {
+                return Err(CustomError::error(
+                    "Invalid fragment type",
+                    x.to_string(),
+                    Context::none(),
+                ))
+            }
+        };
+
+        Ok(Self {
+            series_id,
+            series_number,
+        })
+    }
+}
+
+impl Display for SafePosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.series_id as char, self.series_number)
+    }
+}
 
 #[derive(Debug)]
 pub struct FragmentMassBuilder {
@@ -75,19 +125,17 @@ impl FragmentMassBuilder {
     pub fn fragment_mzs_from_linear_peptide(
         &self,
         peptide: &LinearPeptide,
-        // peptide_seq: &str,
-    ) -> Result<Vec<(Option<Position>, f64)>, CustomError> {
-        // let peptide = LinearPeptide::pro_forma(peptide_seq)?;
+    ) -> Result<Vec<(SafePosition, f64)>, CustomError> {
         let ions = peptide.generate_theoretical_fragments(self.max_charge, &self.model);
         // Does this generate ions above the charge of the precursor?
-        Ok(ions
-            .into_iter()
+        ions.into_iter()
             .map(|x| {
-                (
-                    x.ion.position().copied(),
+                Ok((
+                    // x.ion.position().copied(),
+                    SafePosition::new(x.ion.clone())?,
                     x.mz(MassMode::Monoisotopic).value,
-                )
+                ))
             })
-            .collect::<Vec<(Option<Position>, f64)>>())
+            .collect()
     }
 }

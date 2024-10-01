@@ -2,17 +2,16 @@ use super::fragment_mass_builder::FragmentMassBuilder;
 use log::warn;
 use rustyms::error::Context;
 use rustyms::error::CustomError;
-use rustyms::fragment::Position;
 use rustyms::LinearPeptide;
 use rustyms::MolecularCharge;
 use std::collections::HashMap;
 use std::ops::{RangeBounds, RangeInclusive};
 
+use crate::fragment_mass::fragment_mass_builder::SafePosition;
 use rayon::prelude::*;
 use rustyms::MultiChemical;
-use timsquery::models::elution_group::ElutionGroup;
-
 use serde::ser::Serialize;
+use timsquery::models::elution_group::ElutionGroup;
 
 /// Super simple 1/k0 prediction.
 ///
@@ -40,29 +39,6 @@ pub fn supersimpleprediction(mz: f64, charge: i32) -> f64 {
         + (3.957e-01 * log1p_sq_mz_over_charge)
         + (4.157e-07 * sq_mz_over_charge)
         + (1.417e-01 * charge as f64)
-}
-
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub struct SerializablePosition(Option<Position>);
-
-impl Serialize for SerializablePosition {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self.0 {
-            Some(x) => {
-                serializer.serialize_some(&format!("{}.{}", x.series_number, x.sequence_index))
-            }
-            None => serializer.serialize_none(),
-        }
-    }
-}
-
-impl From<Option<Position>> for SerializablePosition {
-    fn from(x: Option<Position>) -> Self {
-        Self(x)
-    }
 }
 
 #[derive(Debug)]
@@ -95,7 +71,7 @@ impl SequenceToElutionGroupConverter {
         &self,
         sequence: &str,
         id: u64,
-    ) -> Result<Vec<ElutionGroup<SerializablePosition>>, CustomError> {
+    ) -> Result<Vec<ElutionGroup<SafePosition>>, CustomError> {
         let mut peptide = LinearPeptide::pro_forma(sequence)?;
         let pep_formulas = peptide.formulas();
         let pep_mono_mass = if pep_formulas.len() > 1 {
@@ -134,16 +110,14 @@ impl SequenceToElutionGroupConverter {
                 mobility: mobility as f32,
                 rt_seconds: 0.0f32,
                 precursor_charge: charge,
-                fragment_mzs: HashMap::from_iter(
-                    fragment_mzs.into_iter().map(|(k, v)| (k.into(), v)),
-                ),
+                fragment_mzs: HashMap::from_iter(fragment_mzs.into_iter().map(|(k, v)| (k, v))),
             })
         }
 
         Ok(out)
     }
 
-    pub fn convert_sequences(&self, sequences: &[&str]) -> Vec<ElutionGroup<SerializablePosition>> {
+    pub fn convert_sequences(&self, sequences: &[&str]) -> Vec<ElutionGroup<SafePosition>> {
         sequences
             .par_iter()
             .enumerate()

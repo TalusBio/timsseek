@@ -1,2 +1,6 @@
 
 target/
+results/
+results_bak/
+flamegraph.svg
+cargo-flamegraph.stacks

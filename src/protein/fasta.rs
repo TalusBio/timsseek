@@ -120,9 +120,10 @@ impl ProteinSequenceCollection {
         ProteinSequenceCollection { sequences }
     }
 
-    pub fn from_fasta_file<P: AsRef<Path>>(
+    pub fn from_fasta_file<P: AsRef<Path> + std::fmt::Debug>(
         file: P,
     ) -> Result<ProteinSequenceCollection, std::io::Error> {
+        debug!("Reading fasta file: {:?}", file);
         let fasta = std::fs::read_to_string(file);
         match fasta {
             Ok(fasta) => Ok(Self::from_fasta(&fasta)),

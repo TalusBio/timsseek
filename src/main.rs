@@ -1,6 +1,5 @@
 use log::{info, warn};
-use rustyms::fragment::Position;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Deref;
 use std::time::Instant;
 
@@ -14,13 +13,12 @@ use timsquery::traits::tolerance::{
     DefaultTolerance, MobilityTolerance, MzToleramce, QuadTolerance, RtTolerance,
 };
 use timsquery::ElutionGroup;
+use timsseek::fragment_mass::elution_group_converter::SequenceToElutionGroupConverter;
 
 use timsseek::digest::digestion::as_decoy_string;
 use timsseek::digest::digestion::{Digest, DigestionEnd, DigestionParameters, DigestionPattern};
-use timsseek::fragment_mass::elution_group_converter::{
-    SequenceToElutionGroupConverter, SerializablePosition,
-};
 use timsseek::fragment_mass::fragment_mass_builder::FragmentMassBuilder;
+use timsseek::fragment_mass::fragment_mass_builder::SafePosition;
 use timsseek::protein::fasta::ProteinSequenceCollection;
 
 use rayon::prelude::*;
@@ -36,6 +34,49 @@ use std::collections::HashSet;
 //
 //
 
+use csv::Writer;
+use std::path::Path;
+
+fn write_results_to_csv<P: AsRef<Path>>(
+    results: &[IonSearchResults],
+    out_path: P,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let start = Instant::now();
+    let mut writer = Writer::from_path(out_path.as_ref())?;
+
+    // Write the headers
+    writer.write_record(&[
+        "sequence",
+        "precursor_charge",
+        "lazy_hyperscore",
+        "lazy_hyperscore_vs_baseline",
+        "apex_npeaks",
+        "apex_intensity",
+        "apex_rt_milliseconds",
+        "avg_mobility_at_apex",
+    ])?;
+
+    for result in results {
+        writer.serialize((
+            result.sequence,
+            result.elution_group.precursor_charge,
+            result.score_data.lazy_hyperscore,
+            result.score_data.lazy_hyperscore_vs_baseline,
+            result.score_data.apex_npeaks,
+            result.score_data.apex_intensity,
+            result.score_data.apex_rt_miliseconds,
+            result.score_data.avg_mobility_at_apex,
+        ))?;
+    }
+    writer.flush()?;
+    log::info!(
+        "Writing took {:?} -> {:?}",
+        start.elapsed(),
+        out_path.as_ref()
+    );
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 struct ScoreData {
     lazy_hyperscore: f64,
@@ -46,11 +87,11 @@ struct ScoreData {
     avg_mobility_at_apex: f64,
 
     #[serde(skip_serializing)]
-    mzs_at_apex: HashMap<SerializablePosition, f64>,
+    mzs_at_apex: BTreeMap<SafePosition, f64>,
 }
 
-impl From<NaturalFinalizedMultiCMGStatsArrays<SerializablePosition>> for ScoreData {
-    fn from(x: NaturalFinalizedMultiCMGStatsArrays<SerializablePosition>) -> Self {
+impl From<NaturalFinalizedMultiCMGStatsArrays<SafePosition>> for ScoreData {
+    fn from(x: NaturalFinalizedMultiCMGStatsArrays<SafePosition>) -> Self {
         let apex_index = x.apex_hyperscore_index;
         let lazy_hyperscore = x.lazy_hyperscore[apex_index];
         let lazy_hyperscore_vs_baseline = x.lazy_hyperscore_vs_baseline[apex_index];
@@ -61,7 +102,7 @@ impl From<NaturalFinalizedMultiCMGStatsArrays<SerializablePosition>> for ScoreDa
         let mzs_at_apex = x
             .transition_mzs
             .iter()
-            .map(|(lab, mzs_vec)| (*lab, mzs_vec[apex_index]))
+            .map(|(lab, mzs_vec)| (lab.clone(), mzs_vec[apex_index]))
             .collect();
 
         ScoreData {
@@ -81,14 +122,14 @@ struct IonSearchResults<'a> {
     sequence: &'a str,
     score_data: ScoreData,
     #[serde(skip_serializing)]
-    elution_group: &'a ElutionGroup<SerializablePosition>,
+    elution_group: &'a ElutionGroup<SafePosition>,
 }
 
 impl<'a> IonSearchResults<'a> {
     fn new(
         sequence: &'a str,
-        elution_group: &'a ElutionGroup<SerializablePosition>,
-        finalized_scores: NaturalFinalizedMultiCMGStatsArrays<SerializablePosition>,
+        elution_group: &'a ElutionGroup<SafePosition>,
+        finalized_scores: NaturalFinalizedMultiCMGStatsArrays<SafePosition>,
     ) -> Self {
         let score_data = ScoreData::from(finalized_scores);
         Self {
@@ -100,47 +141,43 @@ impl<'a> IonSearchResults<'a> {
 }
 
 fn process_chunk<'a>(
-    eg_chunk: &'a [ElutionGroup<SerializablePosition>],
+    eg_chunk: &'a [ElutionGroup<SafePosition>],
     seq_chunk: &'a [&str],
-    def_converter: &'a SequenceToElutionGroupConverter,
     index: &'a QuadSplittedTransposedIndex,
-    factory: &'a MultiCMGStatsFactory<SerializablePosition>,
+    factory: &'a MultiCMGStatsFactory<SafePosition>,
     tolerance: &'a DefaultTolerance,
 ) -> Vec<IonSearchResults<'a>> {
-    let start = Instant::now();
-    let elap_time = start.elapsed();
-    info!(
-        "Converting took {:?} for {} elution_groups",
-        elap_time,
-        eg_chunk.len()
-    );
-    info!(
-        "Time per conversion: {:?}",
-        elap_time / eg_chunk.len() as u32
-    );
-    info!(
-        "Conversions per second: {:?}",
-        eg_chunk.len() as f32 / elap_time.as_secs_f32()
-    );
     let start = Instant::now();
     let res = query_multi_group(index, index, tolerance, &eg_chunk, &|x| factory.build(x));
     let elap_time = start.elapsed();
     info!("Querying + Aggregation took {:?}", elap_time);
 
     let start = Instant::now();
-    let out: Vec<IonSearchResults> = res
+
+    let (out, hyperscores): (Vec<IonSearchResults>, Vec<f64>) = res
         .into_par_iter()
         .zip(seq_chunk.par_iter())
         .zip(eg_chunk.par_iter())
-        .map(|((res_elem, seq_elem), eg_elem)| IonSearchResults::new(seq_elem, eg_elem, res_elem))
-        .collect();
+        .map(|((res_elem, seq_elem), eg_elem)| {
+            let res = IonSearchResults::new(seq_elem, eg_elem, res_elem);
+            let hyperscore = res.score_data.lazy_hyperscore;
+            (res, hyperscore)
+        })
+        .unzip();
 
-    let avg_hyperscore_vs_baseline = out
-        .iter()
-        .map(|x| x.score_data.lazy_hyperscore_vs_baseline)
-        .sum::<f64>()
-        / out.len() as f64;
+    // TODO: make this a compiler flag
+    // let (out, hyperscores): (Vec<IonSearchResults>, Vec<f64>) = res
+    //     .into_iter()
+    //     .zip(seq_chunk.iter())
+    //     .zip(eg_chunk.iter())
+    //     .map(|((res_elem, seq_elem), eg_elem)| {
+    //         let res = IonSearchResults::new(seq_elem, eg_elem, res_elem);
+    //         let hyperscore = res.score_data.lazy_hyperscore;
+    //         (res, hyperscore)
+    //     })
+    //     .unzip();
 
+    let avg_hyperscore_vs_baseline = hyperscores.iter().sum::<f64>() / hyperscores.len() as f64;
     let elapsed = start.elapsed();
     log::info!(
         "Bundling took {:?} for {} elution_groups",
@@ -158,8 +195,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
     env_logger::init();
 
+    // let fasta_location = "/Users/sebastianpaez/Downloads/UP000000625_83333.fasta";
+
+    // Covid 19 fasta
     // let fasta_location = "/Users/sebastianpaez/Downloads/UP000464024_2697049.fasta";
+
+    // Human
     let fasta_location = "/Users/sebastianpaez/git/ionmesh/benchmark/UP000005640_9606.fasta";
+
     let digestion_params = DigestionParameters {
         min_length: 6,
         max_length: 20,
@@ -207,7 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let index = QuadSplittedTransposedIndex::from_path(dotd_file_location)?;
     let factory = MultiCMGStatsFactory {
         converters: (index.mz_converter, index.im_converter),
-        _phantom: std::marker::PhantomData::<SerializablePosition>,
+        _phantom: std::marker::PhantomData::<SafePosition>,
     };
 
     let start = Instant::now();
@@ -224,14 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     digest_sequences.chunks(CHUNK_SIZE).for_each(|seq_chunk| {
         log::info!("Chunk - Targets {}/{}", chunk_num, tot_chunks);
         let eg_chunk = def_converter.convert_sequences(seq_chunk);
-        let out = process_chunk(
-            &eg_chunk,
-            seq_chunk,
-            &def_converter,
-            &index,
-            &factory,
-            &tolerance,
-        );
+        let out = process_chunk(&eg_chunk, seq_chunk, &index, &factory, &tolerance);
         println!("{:?}", out[0]);
         println!("Chunk -Targets {}/{}", chunk_num, tot_chunks);
 
@@ -241,6 +277,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut out_file = std::fs::File::create(out_path.clone()).unwrap();
         serde_json::to_writer_pretty(&mut out_file, &out).unwrap();
         log::info!("Writing took {:?} -> {:?}", start.elapsed(), out_path);
+
+        let out_path = target_dir.join(format!("targets_chunk_{}.csv", chunk_num));
+        write_results_to_csv(&out, out_path).unwrap();
         log::info!("Chunk - Decoys {}/{}", chunk_num, tot_chunks);
 
         let decoys: Vec<String> = seq_chunk.iter().map(|x| as_decoy_string(x)).collect();
@@ -249,7 +288,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let out = process_chunk(
             &decoy_eg_chunk,
             &decoy_str_slc,
-            &def_converter,
             &index,
             &factory,
             &tolerance,
@@ -263,6 +301,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut out_file = std::fs::File::create(out_path.clone()).unwrap();
         serde_json::to_writer_pretty(&mut out_file, &out).unwrap();
         log::info!("Writing took {:?} -> {:?}", start.elapsed(), out_path);
+
+        let out_path = target_dir.join(format!("decoys_chunk_{}.csv", chunk_num));
+        write_results_to_csv(&out, out_path).unwrap();
 
         chunk_num += 1;
     });
