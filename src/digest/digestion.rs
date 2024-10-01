@@ -6,14 +6,14 @@ pub enum DigestionEnd {
     NTerm,
 }
 
-struct DigestionPattern {
+pub struct DigestionPattern {
     pub regex: Regex,
     pub skip_suffix: Option<char>,
     pub skip_prefix: Option<char>,
 }
 
 impl DigestionPattern {
-    fn trypsin() -> Self {
+    pub fn trypsin() -> Self {
         DigestionPattern {
             regex: Regex::new("([KR])").unwrap(),
             skip_suffix: Some('P'),
@@ -21,7 +21,7 @@ impl DigestionPattern {
         }
     }
 
-    fn trypsin_norestriction() -> Self {
+    pub fn trypsin_norestriction() -> Self {
         DigestionPattern {
             regex: Regex::new("([KR])").unwrap(),
             skip_suffix: None,
@@ -30,7 +30,7 @@ impl DigestionPattern {
     }
 }
 
-struct DigestionParameters {
+pub struct DigestionParameters {
     pub min_length: usize,
     pub max_length: usize,
     pub pattern: DigestionPattern,
@@ -86,9 +86,7 @@ impl DigestionParameters {
                         let end = sites[i + j].end;
                         let span = end - start;
 
-                        println!("start: {:?}, end: {:?}", start, end);
                         if span < self.min_length || span > self.max_length {
-                            println!("span: {:?}", span);
                             return None;
                         }
                         Some(Digest {
@@ -100,11 +98,32 @@ impl DigestionParameters {
             })
             .collect()
     }
+
+    pub fn digest_multiple<'a>(&self, sequences: &[&'a str]) -> Vec<Digest<'a>> {
+        sequences.iter().flat_map(|seq| self.digest(seq)).collect()
+    }
 }
 
 #[derive(Debug)]
-struct Digest<'a> {
+pub struct Digest<'a> {
     pub sequence: &'a str,
+}
+
+impl<'a> Digest<'a> {
+    pub fn as_decoy_string(&self) -> String {
+        as_decoy_string(self.sequence)
+    }
+}
+
+pub fn as_decoy_string(sequence: &str) -> String {
+    let mut sequence = sequence.to_string();
+    let inner_rev = sequence[1..(sequence.len() - 1)]
+        .chars()
+        .rev()
+        .collect::<String>();
+    sequence.replace_range(1..(sequence.len() - 1), &inner_rev);
+
+    sequence
 }
 
 #[cfg(test)]
@@ -165,5 +184,15 @@ mod tests {
         assert_eq!(digests[0].sequence, "PEPTI");
         assert_eq!(digests[1].sequence, "KDEPIN");
         assert_eq!(digests[2].sequence, "KDEPINK");
+    }
+
+    #[test]
+    fn test_decoy() {
+        let my_digest = Digest {
+            sequence: "PEPTIDEPINK",
+        };
+        let decoy = my_digest.as_decoy_string();
+        assert_eq!(my_digest.sequence, "PEPTIDEPINK");
+        assert_eq!(decoy, "PNIPEDITPEK");
     }
 }

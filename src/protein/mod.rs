@@ -1,2 +1,2 @@
-mod fasta;
+pub mod fasta;
 mod models;

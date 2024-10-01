@@ -21,3 +21,7 @@ regex = "1.10.6"
 default = ["cli"]
 cli = ["dep:clap"]
 tui = ["dep:ratatui", "dep:crossterm", "cli"]
+
+[profile.release]
+lto = 'fat'
+codegen-units = 1
