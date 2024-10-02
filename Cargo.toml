@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 rustyms = "0.8.3"
 # timsquery = { git = "https://github.com/talusbio/timsquery.git", tag = "v0.4.0" }
-timsquery = { path = "../timsquery" } 
+timsquery = { path = "../timsquery" }
 rayon = "1.5"
 clap = { version = "4.5.17", features = ["derive"], optional = true }
 serde = { version = "1.0.204", features = ["derive"] }
@@ -20,9 +20,17 @@ regex = "1.10.6"
 csv = "1.3.0"
 
 [features]
-default = ["cli"]
+default = ["cli", "tui"]
 cli = ["dep:clap"]
 tui = ["dep:ratatui", "dep:crossterm", "cli"]
+
+[[bin]]
+name = "timsseek"
+path = "src/main.rs"
+
+[[bin]]
+name = "timsseek-tui"
+path = "tui/main.rs"
 
 [profile.release]
 lto = 'thin'

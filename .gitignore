@@ -1,6 +1,7 @@
 
 target/
 results/
-results_bak/
+results_bak*/
 flamegraph.svg
 cargo-flamegraph.stacks
+last_chromatograms.json

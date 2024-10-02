@@ -1,31 +1,28 @@
 use log::{info, warn};
+use rayon::prelude::*;
+use serde::ser::SerializeMap;
+use serde::Serialize;
+use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Deref;
 use std::time::Instant;
-
 use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::{
     FinalizedMultiCMGStatsArrays, NaturalFinalizedMultiCMGStatsArrays,
 };
-use timsquery::models::aggregators::{self, MultiCMGStatsFactory};
+use timsquery::models::aggregators::MultiCMGStatsFactory;
+use timsquery::models::elution_group;
 use timsquery::models::indices::transposed_quad_index::QuadSplittedTransposedIndex;
 use timsquery::queriable_tims_data::queriable_tims_data::query_multi_group;
 use timsquery::traits::tolerance::{
     DefaultTolerance, MobilityTolerance, MzToleramce, QuadTolerance, RtTolerance,
 };
 use timsquery::ElutionGroup;
-use timsseek::fragment_mass::elution_group_converter::SequenceToElutionGroupConverter;
-
 use timsseek::digest::digestion::as_decoy_string;
 use timsseek::digest::digestion::{Digest, DigestionEnd, DigestionParameters, DigestionPattern};
+use timsseek::fragment_mass::elution_group_converter::SequenceToElutionGroupConverter;
 use timsseek::fragment_mass::fragment_mass_builder::FragmentMassBuilder;
 use timsseek::fragment_mass::fragment_mass_builder::SafePosition;
 use timsseek::protein::fasta::ProteinSequenceCollection;
-
-use rayon::prelude::*;
-use serde::ser::SerializeMap;
-use serde::Serialize;
-
-use std::collections::HashSet;
 
 // timseek --fasta asdasdad --config asdad.json --out_dir outputs # should generate a
 // 'results.sqlite' with 1 score per unique peptide+charge in the fasta file.
@@ -50,6 +47,8 @@ fn write_results_to_csv<P: AsRef<Path>>(
         "precursor_charge",
         "lazy_hyperscore",
         "lazy_hyperscore_vs_baseline",
+        "lazier_score",
+        "lazier_score_vs_baseline",
         "apex_npeaks",
         "apex_intensity",
         "apex_rt_milliseconds",
@@ -59,9 +58,11 @@ fn write_results_to_csv<P: AsRef<Path>>(
     for result in results {
         writer.serialize((
             result.sequence,
-            result.elution_group.precursor_charge,
+            result.precursor_data.charge,
             result.score_data.lazy_hyperscore,
             result.score_data.lazy_hyperscore_vs_baseline,
+            result.score_data.lazier_score,
+            result.score_data.lazier_score_vs_baseline,
             result.score_data.apex_npeaks,
             result.score_data.apex_intensity,
             result.score_data.apex_rt_miliseconds,
@@ -77,37 +78,54 @@ fn write_results_to_csv<P: AsRef<Path>>(
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
+type MzDeltaPair = (f64, f64);
+
+#[derive(Debug, Serialize, Clone)]
 struct ScoreData {
     lazy_hyperscore: f64,
     lazy_hyperscore_vs_baseline: f64,
+    lazier_score: f64,
+    lazier_score_vs_baseline: f64,
     apex_npeaks: usize,
     apex_intensity: u64,
     apex_rt_miliseconds: u32,
     avg_mobility_at_apex: f64,
 
     #[serde(skip_serializing)]
-    mzs_at_apex: BTreeMap<SafePosition, f64>,
+    mzs_at_apex: BTreeMap<SafePosition, MzDeltaPair>,
 }
 
-impl From<NaturalFinalizedMultiCMGStatsArrays<SafePosition>> for ScoreData {
-    fn from(x: NaturalFinalizedMultiCMGStatsArrays<SafePosition>) -> Self {
-        let apex_index = x.apex_hyperscore_index;
+impl ScoreData {
+    fn new(
+        x: NaturalFinalizedMultiCMGStatsArrays<SafePosition>,
+        elution_group: &ElutionGroup<SafePosition>,
+    ) -> Self {
+        let apex_index = x.apex_primary_score_index;
         let lazy_hyperscore = x.lazy_hyperscore[apex_index];
         let lazy_hyperscore_vs_baseline = x.lazy_hyperscore_vs_baseline[apex_index];
+
+        let lazier_score = x.lazyerscore[apex_index];
+        let lazier_score_vs_baseline = x.lazyerscore_vs_baseline[apex_index];
+
         let apex_npeaks = x.npeaks[apex_index];
         let apex_intensity = x.summed_intensity[apex_index];
         let apex_rt_miliseconds = x.retention_time_miliseconds[apex_index];
         let avg_mobility_at_apex = x.average_mobility[apex_index];
-        let mzs_at_apex = x
-            .transition_mzs
-            .iter()
-            .map(|(lab, mzs_vec)| (lab.clone(), mzs_vec[apex_index]))
-            .collect();
+
+        let mut mzs_at_apex = BTreeMap::new();
+        for (lab, theo_mz) in elution_group.fragment_mzs.iter() {
+            let obs_mz = match x.transition_mzs.get(lab) {
+                Some(x) => x[apex_index],
+                None => f64::NAN,
+            }; //[lab][apex_index];
+            mzs_at_apex.insert(lab.clone(), (*theo_mz, *theo_mz - obs_mz));
+        }
 
         ScoreData {
             lazy_hyperscore,
             lazy_hyperscore_vs_baseline,
+            lazier_score,
+            lazier_score_vs_baseline,
             apex_npeaks,
             apex_intensity,
             apex_rt_miliseconds,
@@ -117,12 +135,19 @@ impl From<NaturalFinalizedMultiCMGStatsArrays<SafePosition>> for ScoreData {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
+struct PrecursorData {
+    pub charge: u8,
+    pub mz: f64,
+    pub mobility: f32,
+    pub rt: f32,
+}
+
+#[derive(Debug, Serialize, Clone)]
 struct IonSearchResults<'a> {
     sequence: &'a str,
     score_data: ScoreData,
-    #[serde(skip_serializing)]
-    elution_group: &'a ElutionGroup<SafePosition>,
+    precursor_data: PrecursorData,
 }
 
 impl<'a> IonSearchResults<'a> {
@@ -131,11 +156,18 @@ impl<'a> IonSearchResults<'a> {
         elution_group: &'a ElutionGroup<SafePosition>,
         finalized_scores: NaturalFinalizedMultiCMGStatsArrays<SafePosition>,
     ) -> Self {
-        let score_data = ScoreData::from(finalized_scores);
+        let score_data = ScoreData::new(finalized_scores, elution_group);
+        let precursor_data = PrecursorData {
+            charge: elution_group.precursor_charge,
+            mz: elution_group.precursor_mz,
+            mobility: elution_group.mobility,
+            rt: elution_group.rt_seconds,
+        };
+
         Self {
             sequence,
-            elution_group,
             score_data,
+            precursor_data,
         }
     }
 }
@@ -154,14 +186,15 @@ fn process_chunk<'a>(
 
     let start = Instant::now();
 
-    let (out, hyperscores): (Vec<IonSearchResults>, Vec<f64>) = res
+    let (out, (hyperscores, lazyerscores)): (Vec<IonSearchResults>, (Vec<f64>, Vec<f64>)) = res
         .into_par_iter()
         .zip(seq_chunk.par_iter())
         .zip(eg_chunk.par_iter())
         .map(|((res_elem, seq_elem), eg_elem)| {
             let res = IonSearchResults::new(seq_elem, eg_elem, res_elem);
-            let hyperscore = res.score_data.lazy_hyperscore;
-            (res, hyperscore)
+            let hyperscore = res.score_data.lazy_hyperscore_vs_baseline;
+            let lazyscore = res.score_data.lazier_score_vs_baseline;
+            (res, (hyperscore, lazyscore))
         })
         .unzip();
 
@@ -178,6 +211,17 @@ fn process_chunk<'a>(
     //     .unzip();
 
     let avg_hyperscore_vs_baseline = hyperscores.iter().sum::<f64>() / hyperscores.len() as f64;
+    let avg_lazyerscore_vs_baseline = lazyerscores.iter().sum::<f64>() / lazyerscores.len() as f64;
+
+    if avg_lazyerscore_vs_baseline.is_nan() {
+        log::error!("avg lazyerscore is nan -> {:?}", lazyerscores);
+        out.iter()
+            .filter(|x| x.score_data.lazier_score_vs_baseline.is_nan())
+            .for_each(|x| {
+                log::error!("NaN lazyerscore: {:?}", x);
+            });
+        assert!(false);
+    }
     let elapsed = start.elapsed();
     log::info!(
         "Bundling took {:?} for {} elution_groups",
@@ -185,9 +229,10 @@ fn process_chunk<'a>(
         eg_chunk.len()
     );
     println!(
-        "Avg hyperscore vs baseline: {:?}",
-        avg_hyperscore_vs_baseline
+        "Avg hyperscore vs baseline: {:?}; avg lazyerscore vs baseline: {:?}",
+        avg_hyperscore_vs_baseline, avg_lazyerscore_vs_baseline
     );
+
     out
 }
 
@@ -244,7 +289,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tolerance = DefaultTolerance {
         ms: MzToleramce::Ppm((50.0, 50.0)),
         rt: RtTolerance::None,
-        mobility: MobilityTolerance::Pct((15.0, 15.0)),
+        mobility: MobilityTolerance::Pct((20.0, 20.0)),
         quad: QuadTolerance::Absolute((0.1, 0.1, 1)),
     };
     let index = QuadSplittedTransposedIndex::from_path(dotd_file_location)?;
@@ -254,7 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let start = Instant::now();
-    const CHUNK_SIZE: usize = 20000;
+    const CHUNK_SIZE: usize = 10000;
     let tot_elems = digest_sequences.len();
     let tot_chunks = tot_elems / CHUNK_SIZE;
     let mut chunk_num = 0;
@@ -268,7 +313,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::info!("Chunk - Targets {}/{}", chunk_num, tot_chunks);
         let eg_chunk = def_converter.convert_sequences(seq_chunk);
         let out = process_chunk(&eg_chunk, seq_chunk, &index, &factory, &tolerance);
-        println!("{:?}", out[0]);
+        let first_target = out[0].clone();
+        // println!("{:?}", out[0]);
         println!("Chunk -Targets {}/{}", chunk_num, tot_chunks);
 
         let start = Instant::now();
@@ -292,7 +338,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &factory,
             &tolerance,
         );
-        println!("{:?}", out[0]);
+        let first_decoy = out[0].clone();
+        // println!("{}", out[0]);
         println!("Chunk - Decoys {}/{}", chunk_num, tot_chunks);
 
         let start = Instant::now();
@@ -304,6 +351,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let out_path = target_dir.join(format!("decoys_chunk_{}.csv", chunk_num));
         write_results_to_csv(&out, out_path).unwrap();
+
+        println!("First decoy: {:?}", first_decoy);
+        println!("First target: {:?}", first_target);
 
         chunk_num += 1;
     });
