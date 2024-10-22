@@ -50,8 +50,23 @@ pub enum AppMessages {
     Quit,
 }
 
+// TODO: Change this redraw by doing 2 things ...
+// 1. Make this a message
+// 2. change the way I handle messages from being a single message that gets
+//    dispatched to a queue that gets processed.
 type ShouldRedraw = bool;
 
+/// The main application state.
+///
+/// This struct is meant to hall all mutable state in the application and
+/// its implementations are responsible for piping the events to the correct
+/// way to manage it.
+///
+/// I am attempting to maintain the ELM architecture for the purpose of
+/// simpliciry in the development. I am aware this might have some drawbacks
+/// and if there is a compeling reason to do so I will gladly consider changing
+/// it. (Having said so I would appreciate a discussion on this topic)
+///
 #[derive(Debug)]
 pub struct App {
     index: Option<QuadSplittedTransposedIndex>,

@@ -1,11 +1,13 @@
 use regex::Regex;
 use std::ops::Range;
 
+#[derive(Debug, Clone)]
 pub enum DigestionEnd {
     CTerm,
     NTerm,
 }
 
+#[derive(Debug, Clone)]
 pub struct DigestionPattern {
     pub regex: Regex,
     pub skip_suffix: Option<char>,
@@ -30,6 +32,7 @@ impl DigestionPattern {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct DigestionParameters {
     pub min_length: usize,
     pub max_length: usize,

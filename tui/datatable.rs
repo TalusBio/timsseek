@@ -69,6 +69,11 @@ impl Default for TableInfo {
                 note: "Note".to_string(),
             },
             Data {
+                peptide: "VPLLVAQINPLVGGQAITK".to_string(),
+                charge: "2".to_string(),
+                note: "Note".to_string(),
+            },
+            Data {
                 peptide: "SYFNANTNVHMFK".to_string(),
                 charge: "2".to_string(),
                 note: "Note".to_string(),
@@ -108,7 +113,7 @@ impl TableInfo {
 }
 
 const ITEM_HEIGHT: usize = 2;
-const INFO_TEXT: &str = "(Esc) quit | (↑) move up | (↓) move down ";
+const INFO_TEXT: &str = "(Esc) quit | (↑/k) move up | (↓/j) move down ";
 
 impl TableInfo {
     pub fn next(&mut self) -> Data {

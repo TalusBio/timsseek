@@ -4,8 +4,8 @@ use rustyms::fragment::FragmentType;
 use rustyms::model::Location;
 use rustyms::spectrum::MassMode;
 use rustyms::system::{e, f64::MassOverCharge, mass_over_charge::mz, Charge};
-use rustyms::LinearPeptide;
 use rustyms::Model;
+use rustyms::{Fragment, LinearPeptide};
 use serde::Serialize;
 use std::fmt::Display;
 
@@ -13,6 +13,7 @@ use std::fmt::Display;
 pub struct SafePosition {
     pub series_id: u8,
     pub series_number: u32,
+    pub charge: u8,
 }
 
 impl Serialize for SafePosition {
@@ -25,7 +26,7 @@ impl Serialize for SafePosition {
 }
 
 impl SafePosition {
-    fn new(x: FragmentType) -> Result<Self, CustomError> {
+    fn new(x: FragmentType, charge: u8) -> Result<Self, CustomError> {
         let (series_id, series_number) = match x {
             FragmentType::a(position) => ('a' as u8, position.series_number as u32),
             FragmentType::b(position) => ('b' as u8, position.series_number as u32),
@@ -47,13 +48,18 @@ impl SafePosition {
         Ok(Self {
             series_id,
             series_number,
+            charge,
         })
     }
 }
 
 impl Display for SafePosition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}.{}", self.series_id as char, self.series_number)
+        write!(
+            f,
+            "{}.{}^{}",
+            self.series_id as char, self.series_number, self.charge
+        )
     }
 }
 
@@ -126,13 +132,21 @@ impl FragmentMassBuilder {
         &self,
         peptide: &LinearPeptide,
     ) -> Result<Vec<(SafePosition, f64)>, CustomError> {
-        let ions = peptide.generate_theoretical_fragments(self.max_charge, &self.model);
+        // NOTE: I have to add this retain bc it generates precursor ions even if they are not
+        // defined.
+        let ions: Vec<Fragment> = peptide
+            .generate_theoretical_fragments(self.max_charge, &self.model)
+            .into_iter()
+            .filter(|x| match x.ion {
+                FragmentType::precursor => false,
+                _ => true,
+            })
+            .collect();
         // Does this generate ions above the charge of the precursor?
         ions.into_iter()
             .map(|x| {
                 Ok((
-                    // x.ion.position().copied(),
-                    SafePosition::new(x.ion.clone())?,
+                    SafePosition::new(x.ion.clone(), x.charge.abs().value as u8)?,
                     x.mz(MassMode::Monoisotopic).value,
                 ))
             })

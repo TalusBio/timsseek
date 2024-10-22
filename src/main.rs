@@ -44,11 +44,16 @@ fn write_results_to_csv<P: AsRef<Path>>(
     // Write the headers
     writer.write_record(&[
         "sequence",
+        "precursor_mz",
         "precursor_charge",
+        "precursor_mobility_query",
+        "precursor_rt_query",
         "lazy_hyperscore",
         "lazy_hyperscore_vs_baseline",
+        "norm_lazy_hyperscore_vs_baseline",
         "lazier_score",
         "lazier_score_vs_baseline",
+        "norm_lazier_score_vs_baseline",
         "apex_npeaks",
         "apex_intensity",
         "apex_rt_milliseconds",
@@ -58,11 +63,16 @@ fn write_results_to_csv<P: AsRef<Path>>(
     for result in results {
         writer.serialize((
             result.sequence,
+            result.precursor_data.mz,
             result.precursor_data.charge,
+            result.precursor_data.mobility,
+            result.precursor_data.rt,
             result.score_data.lazy_hyperscore,
             result.score_data.lazy_hyperscore_vs_baseline,
+            result.score_data.norm_hyperscore_vs_baseline,
             result.score_data.lazier_score,
             result.score_data.lazier_score_vs_baseline,
+            result.score_data.norm_lazyerscore_vs_baseline,
             result.score_data.apex_npeaks,
             result.score_data.apex_intensity,
             result.score_data.apex_rt_miliseconds,
@@ -84,8 +94,10 @@ type MzDeltaPair = (f64, f64);
 struct ScoreData {
     lazy_hyperscore: f64,
     lazy_hyperscore_vs_baseline: f64,
+    norm_hyperscore_vs_baseline: f64,
     lazier_score: f64,
     lazier_score_vs_baseline: f64,
+    norm_lazyerscore_vs_baseline: f64,
     apex_npeaks: usize,
     apex_intensity: u64,
     apex_rt_miliseconds: u32,
@@ -103,9 +115,11 @@ impl ScoreData {
         let apex_index = x.apex_primary_score_index;
         let lazy_hyperscore = x.lazy_hyperscore[apex_index];
         let lazy_hyperscore_vs_baseline = x.lazy_hyperscore_vs_baseline[apex_index];
+        let norm_hyperscore_vs_baseline = x.norm_hyperscore_vs_baseline[apex_index];
 
         let lazier_score = x.lazyerscore[apex_index];
         let lazier_score_vs_baseline = x.lazyerscore_vs_baseline[apex_index];
+        let norm_lazyerscore_vs_baseline = x.norm_lazyerscore_vs_baseline[apex_index];
 
         let apex_npeaks = x.npeaks[apex_index];
         let apex_intensity = x.summed_intensity[apex_index];
@@ -124,8 +138,10 @@ impl ScoreData {
         ScoreData {
             lazy_hyperscore,
             lazy_hyperscore_vs_baseline,
+            norm_hyperscore_vs_baseline,
             lazier_score,
             lazier_score_vs_baseline,
+            norm_lazyerscore_vs_baseline,
             apex_npeaks,
             apex_intensity,
             apex_rt_miliseconds,
@@ -186,7 +202,12 @@ fn process_chunk<'a>(
 
     let start = Instant::now();
 
-    let (out, (hyperscores, lazyerscores)): (Vec<IonSearchResults>, (Vec<f64>, Vec<f64>)) = res
+    type VecTuple = (Vec<f64>, Vec<f64>);
+    type DoubleVecTuple = (VecTuple, VecTuple);
+    let (out, ((hyperscores, lazyerscores), (norm_lazy, norm_hyper))): (
+        Vec<IonSearchResults>,
+        DoubleVecTuple,
+    ) = res
         .into_par_iter()
         .zip(seq_chunk.par_iter())
         .zip(eg_chunk.par_iter())
@@ -194,7 +215,12 @@ fn process_chunk<'a>(
             let res = IonSearchResults::new(seq_elem, eg_elem, res_elem);
             let hyperscore = res.score_data.lazy_hyperscore_vs_baseline;
             let lazyscore = res.score_data.lazier_score_vs_baseline;
-            (res, (hyperscore, lazyscore))
+            let norm_lazyscore = res.score_data.norm_lazyerscore_vs_baseline;
+            let norm_hyperscore = res.score_data.norm_hyperscore_vs_baseline;
+            (
+                res,
+                ((hyperscore, lazyscore), (norm_lazyscore, norm_hyperscore)),
+            )
         })
         .unzip();
 
@@ -212,25 +238,19 @@ fn process_chunk<'a>(
 
     let avg_hyperscore_vs_baseline = hyperscores.iter().sum::<f64>() / hyperscores.len() as f64;
     let avg_lazyerscore_vs_baseline = lazyerscores.iter().sum::<f64>() / lazyerscores.len() as f64;
+    let avg_norm_lazyerscore_vs_baseline = norm_lazy.iter().sum::<f64>() / norm_lazy.len() as f64;
+    let avg_norm_hyperscore_vs_baseline = norm_hyper.iter().sum::<f64>() / norm_hyper.len() as f64;
 
-    if avg_lazyerscore_vs_baseline.is_nan() {
-        log::error!("avg lazyerscore is nan -> {:?}", lazyerscores);
-        out.iter()
-            .filter(|x| x.score_data.lazier_score_vs_baseline.is_nan())
-            .for_each(|x| {
-                log::error!("NaN lazyerscore: {:?}", x);
-            });
-        assert!(false);
-    }
+    assert!(!avg_lazyerscore_vs_baseline.is_nan());
     let elapsed = start.elapsed();
     log::info!(
         "Bundling took {:?} for {} elution_groups",
         elapsed,
         eg_chunk.len()
     );
-    println!(
-        "Avg hyperscore vs baseline: {:?}; avg lazyerscore vs baseline: {:?}",
-        avg_hyperscore_vs_baseline, avg_lazyerscore_vs_baseline
+    log::info!(
+        "Avg hyperscore vs baseline: {:?}; avg lazyerscore vs baseline: {:?} avg norm lazyerscore vs baseline: {:?} avg norm hyperscore vs baseline: {:?}",
+        avg_hyperscore_vs_baseline, avg_lazyerscore_vs_baseline, avg_norm_lazyerscore_vs_baseline, avg_norm_hyperscore_vs_baseline
     );
 
     out
@@ -246,7 +266,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // let fasta_location = "/Users/sebastianpaez/Downloads/UP000464024_2697049.fasta";
 
     // Human
-    let fasta_location = "/Users/sebastianpaez/git/ionmesh/benchmark/UP000005640_9606.fasta";
+    // let fasta_location = "/Users/sebastianpaez/git/ionmesh/benchmark/UP000005640_9606.fasta";
+
+    // Only HeLa proteins fasta
+    let fasta_location = "/Users/sebastianpaez/git/timsseek/data/HeLa_cannonical_proteins.fasta";
 
     let digestion_params = DigestionParameters {
         min_length: 6,
@@ -255,6 +278,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         digestion_end: DigestionEnd::CTerm,
         max_missed_cleavages: 0,
     };
+    info!(
+        "Digesting {} with parameters: \n {:?}",
+        fasta_location, digestion_params
+    );
     let fasta_proteins = ProteinSequenceCollection::from_fasta_file(&fasta_location)?;
     let sequences: Vec<&str> = fasta_proteins
         .sequences
@@ -269,7 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|x| x.sequence)
         .collect();
 
-    let digest_sequences: Vec<&str> = digest_sequences.into_iter().collect();
+    let digest_sequences: Vec<&str> = digest_sequences.iter().cloned().collect();
 
     let elap_time = start.elapsed();
     let time_per_digest = elap_time / digest_sequences.len() as u32;
@@ -314,23 +341,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let eg_chunk = def_converter.convert_sequences(seq_chunk);
         let out = process_chunk(&eg_chunk, seq_chunk, &index, &factory, &tolerance);
         let first_target = out[0].clone();
-        // println!("{:?}", out[0]);
         println!("Chunk -Targets {}/{}", chunk_num, tot_chunks);
-
-        let start = Instant::now();
-        let out_path = target_dir.join(format!("targets_chunk_{}.json", chunk_num));
-        // TODO replace this unwrap with some nice error handling ...
-        let mut out_file = std::fs::File::create(out_path.clone()).unwrap();
-        serde_json::to_writer_pretty(&mut out_file, &out).unwrap();
-        log::info!("Writing took {:?} -> {:?}", start.elapsed(), out_path);
 
         let out_path = target_dir.join(format!("targets_chunk_{}.csv", chunk_num));
         write_results_to_csv(&out, out_path).unwrap();
         log::info!("Chunk - Decoys {}/{}", chunk_num, tot_chunks);
 
         let decoys: Vec<String> = seq_chunk.iter().map(|x| as_decoy_string(x)).collect();
-        let decoy_str_slc = decoys.iter().map(|x| x.as_str()).collect::<Vec<&str>>();
-        let decoy_eg_chunk = def_converter.convert_sequences(&decoy_str_slc);
+        let enum_decoy_str_slc = decoys
+            .iter()
+            .enumerate()
+            .map(|(i, x)| (i, x.as_str()))
+            .filter(|(_i, x)| !digest_sequences.contains(x))
+            .collect::<Vec<(usize, &str)>>();
+
+        log::info!("Number of Decoys to process: {}", enum_decoy_str_slc.len());
+
+        let decoy_str_slc = enum_decoy_str_slc
+            .iter()
+            .map(|x| x.1)
+            .collect::<Vec<&str>>();
+        let decoy_eg_chunk = def_converter.convert_enumerated_sequences(&enum_decoy_str_slc);
         let out = process_chunk(
             &decoy_eg_chunk,
             &decoy_str_slc,
@@ -339,21 +370,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &tolerance,
         );
         let first_decoy = out[0].clone();
-        // println!("{}", out[0]);
         println!("Chunk - Decoys {}/{}", chunk_num, tot_chunks);
-
-        let start = Instant::now();
-        let out_path = target_dir.join(format!("decoys_chunk_{}.json", chunk_num));
-        // TODO replace this unwrap with some nice error handling ...
-        let mut out_file = std::fs::File::create(out_path.clone()).unwrap();
-        serde_json::to_writer_pretty(&mut out_file, &out).unwrap();
-        log::info!("Writing took {:?} -> {:?}", start.elapsed(), out_path);
 
         let out_path = target_dir.join(format!("decoys_chunk_{}.csv", chunk_num));
         write_results_to_csv(&out, out_path).unwrap();
 
-        println!("First decoy: {:?}", first_decoy);
-        println!("First target: {:?}", first_target);
+        println!("First target in chunk: {:#?}", first_target);
+        println!("First decoy in chunk: {:#?}", first_decoy);
 
         chunk_num += 1;
     });

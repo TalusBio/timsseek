@@ -134,6 +134,26 @@ impl SequenceToElutionGroupConverter {
             .flatten()
             .collect()
     }
+
+    pub fn convert_enumerated_sequences(
+        &self,
+        enum_sequences: &[(usize, &str)],
+    ) -> Vec<ElutionGroup<SafePosition>> {
+        enum_sequences
+            .par_iter()
+            .flat_map(|(i, x)| {
+                let tmp = self.convert_sequence(x, *i as u64);
+                match tmp {
+                    Ok(x) => Some(x),
+                    Err(e) => {
+                        warn!("Error converting sequence {}, err: {:?}", x, e);
+                        None
+                    }
+                }
+            })
+            .flatten()
+            .collect()
+    }
 }
 
 // ElutionGroup {
