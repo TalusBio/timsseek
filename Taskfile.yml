@@ -1,0 +1,58 @@
+version: "3"
+
+interval: 100ms
+
+dotenv: [".env"]
+
+tasks:
+  default:
+    watch: true
+    sources:
+      - "src/**/*.rs"
+    cmds:
+      - task: bin-build
+      - task: test
+      - task: fmt
+      - task: clippy
+
+  build:
+    deps: [test, fmt, clippy] # license_check, Deny fails RN due to an old parquet version. fixed in timsrust-dev rn
+    sources:
+      - "src/**/*.rs"
+    cmds:
+      - task: bin-build-release
+
+  bin-build:
+    cmds:
+      - cargo build --bin timsseek
+
+  bin-build-release:
+    deps: [test, fmt]
+    sources:
+      - "src/**/*.rs"
+    cmds:
+      - cargo b --release --bin timsseek
+
+  license_check:
+    cmds:
+      - cargo deny check
+
+  test:
+    cmds:
+      - cargo test
+
+  fmt:
+    cmds:
+      - cargo +nightly fmt
+
+  clippy:
+    cmds:
+      - cargo clippy {{.CLI_ARGS}}
+
+  plot:
+    deps: [bin-build-release]
+    sources:
+      - "data/*.py"
+    cmds:
+      - cargo run --release --bin timsseek
+      - pass

@@ -7,3 +7,5 @@ cargo-flamegraph.stacks
 last_chromatograms.json
 
 plot_results/
+results_bak/*.csv
+results*bak/*.csv

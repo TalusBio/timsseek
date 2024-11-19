@@ -1,16 +1,20 @@
 use super::fragment_mass_builder::FragmentMassBuilder;
-use log::warn;
-use rustyms::error::Context;
-use rustyms::error::CustomError;
-use rustyms::LinearPeptide;
-use rustyms::MolecularCharge;
-use std::collections::HashMap;
-use std::ops::{RangeBounds, RangeInclusive};
-
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
+use crate::isotopes::peptide_isotopes;
+use log::warn;
 use rayon::prelude::*;
-use rustyms::MultiChemical;
-use serde::ser::Serialize;
+use rustyms::error::{
+    Context,
+    CustomError,
+};
+use rustyms::{
+    LinearPeptide,
+    MolecularCharge,
+    MolecularFormula,
+    MultiChemical,
+};
+use std::collections::HashMap;
+use std::ops::RangeInclusive;
 use timsquery::models::elution_group::ElutionGroup;
 
 /// Super simple 1/k0 prediction.
@@ -66,29 +70,63 @@ impl Default for SequenceToElutionGroupConverter {
 
 const PROTON_MASS: f64 = 1.007276466;
 
+// TODO: Find right way ...
+const NEUTRON_MASS: f64 = 1.00;
+
+fn count_carbon_sulphur(form: &MolecularFormula) -> (u16, u16) {
+    let mut ncarbon = 0;
+    let mut nsulphur = 0;
+
+    for (elem, count, _extras) in form.elements() {
+        match (elem, count) {
+            (&rustyms::Element::C, Some(cnt)) => {
+                ncarbon += *cnt;
+            }
+            (&rustyms::Element::S, Some(cnt)) => {
+                nsulphur += *cnt;
+            }
+            _ => {}
+        }
+    }
+
+    (ncarbon, nsulphur)
+}
+
 impl SequenceToElutionGroupConverter {
     pub fn convert_sequence(
         &self,
         sequence: &str,
         id: u64,
-    ) -> Result<Vec<ElutionGroup<SafePosition>>, CustomError> {
+    ) -> Result<(Vec<ElutionGroup<SafePosition>>, Vec<u8>), CustomError> {
         let mut peptide = LinearPeptide::pro_forma(sequence)?;
         let pep_formulas = peptide.formulas();
-        let pep_mono_mass = if pep_formulas.len() > 1 {
+        let (pep_mono_mass, pep_formula) = if pep_formulas.len() > 1 {
             return Err(CustomError::error(
-                &"Peptide contains more than one formula.",
-                &"",
+                "Peptide contains more than one formula.",
+                "",
                 Context::none(),
             ));
         } else {
-            pep_formulas[0].mass(rustyms::MassMode::Monoisotopic)
+            let form = pep_formulas[0].clone();
+            let mono_mass = pep_formulas[0].mass(rustyms::MassMode::Monoisotopic);
+            (mono_mass.value, form)
+        };
+        let (ncarbon, nsulphur) = count_carbon_sulphur(&pep_formula);
+        let pep_isotope = peptide_isotopes(ncarbon, nsulphur);
+        let mut expected_prec_inten = vec![1e-3f32; 4];
+
+        for (ii, isot) in pep_isotope.iter().enumerate() {
+            expected_prec_inten[1 + ii] = *isot
         }
-        .value;
 
         let mut out = Vec::new();
+        let mut out_charges = Vec::new();
 
         for charge in self.precursor_charge_range.clone() {
+            // Q: Why am I adding the charge here manually instead of using the calculator in the
+            // Formula?
             let precursor_mz = (pep_mono_mass + (charge as f64 * PROTON_MASS)) / charge as f64;
+            let nmf = NEUTRON_MASS / (charge as f64);
 
             if precursor_mz < self.min_precursor_mz || precursor_mz > self.max_precursor_mz {
                 continue;
@@ -100,25 +138,39 @@ impl SequenceToElutionGroupConverter {
                 .fragment_buildder
                 .fragment_mzs_from_linear_peptide(&peptide)?;
             fragment_mzs
-                .retain(|(_pos, mz)| *mz > self.min_fragment_mz && *mz < self.max_fragment_mz);
+                .retain(|(_pos, mz, _)| *mz > self.min_fragment_mz && *mz < self.max_fragment_mz);
 
             let mobility = supersimpleprediction(precursor_mz, charge as i32);
+            let mut precursor_mzs = vec![precursor_mz; 4];
+            precursor_mzs[0] -= nmf;
+            precursor_mzs[2] += nmf;
+            precursor_mzs[0] += 2. * nmf;
+
+            let fragment_expect_inten =
+                HashMap::from_iter(fragment_mzs.iter().map(|(k, _, v)| (*k, *v)));
+            let fragment_mzs = HashMap::from_iter(fragment_mzs.iter().map(|(k, v, _)| (*k, *v)));
 
             out.push(ElutionGroup {
                 id,
-                precursor_mz,
+                precursor_mzs,
                 mobility: mobility as f32,
                 rt_seconds: 0.0f32,
-                precursor_charge: charge,
-                fragment_mzs: HashMap::from_iter(fragment_mzs.into_iter().map(|(k, v)| (k, v))),
-            })
+                // precursor_charge: charge,
+                fragment_mzs,
+                expected_fragment_intensity: Some(fragment_expect_inten),
+                expected_precursor_intensity: Some(expected_prec_inten.clone()),
+            });
+            out_charges.push(charge);
         }
 
-        Ok(out)
+        Ok((out, out_charges))
     }
 
-    pub fn convert_sequences(&self, sequences: &[&str]) -> Vec<ElutionGroup<SafePosition>> {
-        sequences
+    pub fn convert_sequences(
+        &self,
+        sequences: &[&str],
+    ) -> Result<(Vec<ElutionGroup<SafePosition>>, Vec<u8>), CustomError> {
+        let (eg, crg) = sequences
             .par_iter()
             .enumerate()
             .flat_map(|(id, sequence)| {
@@ -132,14 +184,15 @@ impl SequenceToElutionGroupConverter {
                 }
             })
             .flatten()
-            .collect()
+            .collect();
+        Ok((eg, crg))
     }
 
     pub fn convert_enumerated_sequences(
         &self,
         enum_sequences: &[(usize, &str)],
-    ) -> Vec<ElutionGroup<SafePosition>> {
-        enum_sequences
+    ) -> Result<(Vec<ElutionGroup<SafePosition>>, Vec<u8>), CustomError> {
+        let (eg, crg) = enum_sequences
             .par_iter()
             .flat_map(|(i, x)| {
                 let tmp = self.convert_sequence(x, *i as u64);
@@ -152,7 +205,8 @@ impl SequenceToElutionGroupConverter {
                 }
             })
             .flatten()
-            .collect()
+            .collect();
+        Ok((eg, crg))
     }
 }
 
@@ -166,9 +220,16 @@ impl SequenceToElutionGroupConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustyms::model::Location;
-    use rustyms::model::Model;
-    use rustyms::system::{e, f64::MassOverCharge, mass_over_charge::mz, Charge};
+    use rustyms::model::{
+        Location,
+        Model,
+    };
+    use rustyms::system::f64::MassOverCharge;
+    use rustyms::system::mass_over_charge::mz;
+    use rustyms::system::{
+        e,
+        Charge,
+    };
 
     #[test]
     fn test_converter() {
@@ -198,9 +259,7 @@ mod tests {
             max_fragment_mz: 2000.,
             min_fragment_mz: 200.,
         };
-        let out = converter.convert_sequences(&[seq]);
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].precursor_charge, 2);
-        assert_eq!(out[1].precursor_charge, 3);
+        let out = converter.convert_sequences(&[seq]).unwrap();
+        assert_eq!(out.0.len(), 2);
     }
 }

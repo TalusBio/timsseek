@@ -1,4 +1,7 @@
-use super::models::{ProteinSequence, ProteinSequenceBuilder};
+use super::models::{
+    ProteinSequence,
+    ProteinSequenceBuilder,
+};
 use log::*;
 use std::collections::HashMap;
 use std::path::Path;

@@ -1,0 +1,6 @@
+
+imports_layout = "Vertical"
+imports_granularity = "Module"
+normalize_comments = true
+reorder_impl_items = true
+version = "Two"
