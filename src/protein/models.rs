@@ -1,9 +1,13 @@
+use std::ops::Range;
+use std::sync::Arc;
+
 #[derive(Debug)]
 pub struct ProteinSequence {
     pub id: u32, // Self incremental identifier within the fasta file.
     pub description: String,
-    pub sequence: String,
+    pub sequence: Arc<str>,
 }
+
 
 #[derive(Debug)]
 pub struct ProteinSequenceBuilder {
@@ -40,7 +44,7 @@ impl ProteinSequenceBuilder {
         ProteinSequence {
             id: self.id,
             description: self.description.unwrap(),
-            sequence: self.sequence,
+            sequence: self.sequence.into(),
         }
     }
 }
