@@ -8,7 +8,6 @@ pub struct ProteinSequence {
     pub sequence: Arc<str>,
 }
 
-
 #[derive(Debug)]
 pub struct ProteinSequenceBuilder {
     pub id: u32,

@@ -54,5 +54,5 @@ tasks:
     sources:
       - "data/*.py"
     cmds:
-      - cargo run --release --bin timsseek
+      - cargo run --release --bin timsseek | bunyan
       - pass

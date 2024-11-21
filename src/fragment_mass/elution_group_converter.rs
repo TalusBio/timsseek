@@ -1,4 +1,5 @@
 use super::fragment_mass_builder::FragmentMassBuilder;
+use crate::digest::digestion::DigestSlice;
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
 use crate::isotopes::peptide_isotopes;
 use log::{
@@ -169,19 +170,27 @@ impl SequenceToElutionGroupConverter {
         Ok((out, out_charges))
     }
 
-    pub fn convert_sequences<'a, T: AsRef<str> + Send + Sync + std::fmt::Debug>(
+    pub fn convert_sequences<'a>(
         &self,
-        sequences: &'a [T],
-    ) -> Result<(Vec<&'a T>, Vec<ElutionGroup<SafePosition>>, Vec<u8>), CustomError> {
+        sequences: &'a [DigestSlice],
+    ) -> Result<
+        (
+            Vec<&'a DigestSlice>,
+            Vec<ElutionGroup<SafePosition>>,
+            Vec<u8>,
+        ),
+        CustomError,
+    > {
         let (seqs, (eg, crg)) = sequences
             .par_iter()
             .enumerate()
-            .flat_map(|(id, sequence)| {
+            .flat_map(|(id, dig_slice)| {
+                let sequence: String = dig_slice.clone().into();
                 let tmp = self.convert_sequence(sequence.as_ref(), id as u64);
                 match tmp {
                     Ok(x) => {
-                        let expanded_sequence: Vec<&T> =
-                            (0..(x.0.len())).map(|_x| sequence).collect();
+                        let expanded_sequence: Vec<&DigestSlice> =
+                            (0..(x.0.len())).map(|_x| dig_slice).collect();
                         Some((expanded_sequence, (x.0, x.1)))
                     }
                     Err(e) => {
@@ -195,17 +204,26 @@ impl SequenceToElutionGroupConverter {
         Ok((seqs, eg, crg))
     }
 
-    pub fn convert_enumerated_sequences<'a, T: AsRef<str> + Send + Sync + std::fmt::Debug>(
+    pub fn convert_enumerated_sequences<'a>(
         &self,
-        enum_sequences: &'a [(usize, T)],
-    ) -> Result<(Vec<&'a T>, Vec<ElutionGroup<SafePosition>>, Vec<u8>), CustomError> {
+        enum_sequences: &'a [(usize, DigestSlice)],
+    ) -> Result<
+        (
+            Vec<&'a DigestSlice>,
+            Vec<ElutionGroup<SafePosition>>,
+            Vec<u8>,
+        ),
+        CustomError,
+    > {
         let (seqs, (eg, crg)) = enum_sequences
             .par_iter()
             .flat_map(|(i, s)| {
-                let tmp = self.convert_sequence(s.as_ref(), *i as u64);
+                let sequence: String = s.clone().into();
+                let tmp = self.convert_sequence(sequence.as_ref(), *i as u64);
                 match tmp {
                     Ok(x) => {
-                        let expanded_sequence: Vec<&T> = (0..(x.0.len())).map(|_x| s).collect();
+                        let expanded_sequence: Vec<&DigestSlice> =
+                            (0..(x.0.len())).map(|_x| s).collect();
                         Some((expanded_sequence, (x.0, x.1)))
                     }
                     Err(e) => {
@@ -223,6 +241,7 @@ impl SequenceToElutionGroupConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::DecoyMarking;
     use rustyms::model::{
         Location,
         Model,
@@ -233,6 +252,7 @@ mod tests {
         e,
         Charge,
     };
+    use std::sync::Arc;
 
     #[test]
     fn test_converter() {
@@ -262,7 +282,10 @@ mod tests {
             max_fragment_mz: 2000.,
             min_fragment_mz: 200.,
         };
-        let seq_slc = vec![seq];
+        let seq: Arc<str> = "PEPTIDEPINK".into();
+        let range_use: std::ops::Range<usize> = 0..seq.len();
+        let dig_slice = DigestSlice::new(seq, range_use, DecoyMarking::Target);
+        let seq_slc = vec![dig_slice];
         let out = converter.convert_sequences(&seq_slc).unwrap();
         assert_eq!(out.0.len(), 2);
     }

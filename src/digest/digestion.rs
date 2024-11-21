@@ -1,5 +1,6 @@
 use crate::models::DecoyMarking;
 use regex::Regex;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
@@ -9,16 +10,46 @@ use std::sync::Arc;
 pub struct DigestSlice {
     ref_seq: Arc<str>,
     range: Range<usize>,
-    decoy: DecoyMarking,
+    pub decoy: DecoyMarking,
+}
+
+impl Serialize for DigestSlice {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let local_str = Into::<String>::into(self.clone());
+        serializer.serialize_str(local_str.as_str())
+    }
 }
 
 impl DigestSlice {
+    pub fn new(ref_seq: Arc<str>, range: Range<usize>, decoy: DecoyMarking) -> Self {
+        Self {
+            ref_seq,
+            range,
+            decoy,
+        }
+    }
+
+    pub fn as_decoy(&self) -> DigestSlice {
+        DigestSlice {
+            ref_seq: self.ref_seq.clone(),
+            range: self.range.clone(),
+            decoy: DecoyMarking::Decoy,
+        }
+    }
+
     pub fn as_decoy_string(&self) -> String {
         as_decoy_string(&self.ref_seq.as_ref()[self.range.clone()])
     }
 
     pub fn len(&self) -> usize {
         self.range.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.range.is_empty()
     }
 }
 
@@ -33,11 +64,11 @@ pub fn deduplicate_digests(mut digest_slices: Vec<DigestSlice>) -> Vec<DigestSli
     digest_slices
 }
 
-impl Into<String> for DigestSlice {
-    fn into(self) -> String {
-        let tmp = &self.ref_seq.as_ref()[self.range.clone()];
+impl From<DigestSlice> for String {
+    fn from(x: DigestSlice) -> Self {
+        let tmp = &x.ref_seq.as_ref()[x.range.clone()];
 
-        match self.decoy {
+        match x.decoy {
             DecoyMarking::Target => tmp.to_string(),
             DecoyMarking::Decoy => as_decoy_string(tmp),
         }

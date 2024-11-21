@@ -1,4 +1,9 @@
 
+*_bkp/
+*_bak/
+*.bkp/
+*.bak/
+
 target/
 results/
 results_bak*/

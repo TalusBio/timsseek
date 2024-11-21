@@ -11,7 +11,7 @@ use timsquery::traits::tolerance::{
     DefaultTolerance, MobilityTolerance, MzToleramce, QuadTolerance, RtTolerance,
 };
 use timsquery::ElutionGroup;
-use timsseek::digest::digestion::{as_decoy_string, DigestSlice};
+use timsseek::digest::digestion::{as_decoy_string, DigestSlice, deduplicate_digests};
 use timsseek::digest::digestion::{DigestionEnd, DigestionParameters, DigestionPattern};
 use timsseek::errors::TimsSeekError;
 use timsseek::fragment_mass::elution_group_converter::SequenceToElutionGroupConverter;
@@ -19,18 +19,20 @@ use timsseek::fragment_mass::fragment_mass_builder::SafePosition;
 use timsseek::protein::fasta::ProteinSequenceCollection;
 use timsseek::scoring::search_results::{IonSearchResults, write_results_to_csv};
 use timsseek::models::DecoyMarking;
+use core::marker::Send;
+use rayon::vec::IntoIter as RayonVecIntoIter;
+use rayon::iter::Zip as RayonZip;
+use std::sync::Arc;
 
 fn process_chunk<'a>(
-    eg_chunk: &'a [ElutionGroup<SafePosition>],
-    crg_chunk: &'a [u8],
-    seq_chunk: &'a [&str],
+    queries: NamedQueryChunk,
     index: &'a QuadSplittedTransposedIndex,
     factory: &'a MultiCMGStatsFactory<SafePosition>,
     tolerance: &'a DefaultTolerance,
-    decoy: DecoyMarking,
-) -> Vec<IonSearchResults<'a>> {
+) -> Vec<IonSearchResults> {
     let start = Instant::now();
-    let res = query_multi_group(index, tolerance, eg_chunk, &|x| {
+    let num_queries = queries.len();
+    let res = query_multi_group(index, tolerance, &queries.queries, &|x| {
         factory.build_with_elution_group(x)
     });
     let elap_time = start.elapsed();
@@ -40,10 +42,10 @@ fn process_chunk<'a>(
 
     let (out, main_scores): (Vec<IonSearchResults>, Vec<f64>) = res
         .into_par_iter()
-        .zip(seq_chunk.par_iter().zip(crg_chunk.par_iter()))
-        .zip(eg_chunk.par_iter())
-        .map(|((res_elem, (seq_elem, crg_elem)), eg_elem)| {
-            let res = IonSearchResults::new(seq_elem, *crg_elem, eg_elem, res_elem, decoy);
+        .zip(queries.into_zip_par_iter())
+        .map(|(res_elem, (eg_elem, (digest, charge_elem)))| {
+            let decoy = digest.decoy;
+            let res = IonSearchResults::new(digest, charge_elem, &eg_elem, res_elem, decoy);
             let main_score = res.score_data.main_score;
             (res, main_score)
         })
@@ -56,7 +58,7 @@ fn process_chunk<'a>(
     log::info!(
         "Bundling took {:?} for {} elution_groups",
         elapsed,
-        eg_chunk.len()
+        num_queries,
     );
     log::info!("Avg main score: {:?}", avg_main_scores);
 
@@ -65,25 +67,48 @@ fn process_chunk<'a>(
 
 #[derive(Debug, Clone)]
 struct NamedQueryChunk {
-    names: Vec<DigestSlice>,
-    decoy: DecoyMarking,
+    digests: Vec<DigestSlice>,
     charges: Vec<u8>,
     queries: Vec<ElutionGroup<SafePosition>>,
 }
 
 impl NamedQueryChunk {
     fn new(
-        names: Vec<DigestSlice>,
-        decoy: DecoyMarking,
+        digests: Vec<DigestSlice>,
         charges: Vec<u8>,
         queries: Vec<ElutionGroup<SafePosition>>,
     ) -> Self {
+        assert_eq!(digests.len(), charges.len());
+        assert_eq!(digests.len(), queries.len());
         Self {
-            names,
-            decoy,
+            digests,
             charges,
             queries,
         }
+    }
+
+    fn into_zip_par_iter(
+        self,
+    ) -> RayonZip<
+        RayonVecIntoIter<ElutionGroup<SafePosition>>,
+        RayonZip<RayonVecIntoIter<DigestSlice>, RayonVecIntoIter<u8>>,
+    > {
+        // IN THEORY I should implement IntoIter for this struct
+        // but I failed at it (skill issues?) so this will do for now.
+        // JSPP - 2024-11-21
+        self.queries.into_par_iter().zip(
+            self.digests
+                .into_par_iter()
+                .zip(self.charges.into_par_iter()),
+        )
+    }
+
+    fn len(&self) -> usize {
+        self.queries.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queries.is_empty()
     }
 }
 
@@ -93,6 +118,7 @@ struct DigestedSequenceIterator {
     max_iterations: usize,
     iteration_index: usize,
     converter: SequenceToElutionGroupConverter,
+    build_decoys: bool,
 }
 
 impl DigestedSequenceIterator {
@@ -100,6 +126,7 @@ impl DigestedSequenceIterator {
         digest_sequences: Vec<DigestSlice>,
         chunk_size: usize,
         converter: SequenceToElutionGroupConverter,
+        build_decoys: bool,
     ) -> Self {
         let max_iterations = digest_sequences.len() / chunk_size;
         Self {
@@ -108,36 +135,39 @@ impl DigestedSequenceIterator {
             max_iterations,
             converter,
             iteration_index: 0,
+            build_decoys,
         }
     }
 
-    fn get_chunk_str(&self, chunk_index: usize) -> &[DigestSlice] {
+    fn get_chunk_digests(&self, chunk_index: usize) -> &[DigestSlice] {
         let start = chunk_index * self.chunk_size;
         let end = start + self.chunk_size;
         &self.digest_sequences[start..end]
     }
 
-    fn target_chunk(&self, chunk_index: usize) -> NamedQueryChunk {
-        let decoy = DecoyMarking::Target;
-        let seqs = self.get_chunk_str(chunk_index);
+    fn get_chunk(&self, chunk_index: usize) -> NamedQueryChunk {
+        let seqs = self.get_chunk_digests(chunk_index);
         let (eg_seq, eg_chunk, charge_chunk) = self.converter.convert_sequences(seqs).unwrap();
-        NamedQueryChunk::new(eg_seq, decoy, charge_chunk, eg_chunk)
+        let eg_seq = eg_seq.into_iter().map(|x| x.clone()).collect();
+        NamedQueryChunk::new(eg_seq, charge_chunk, eg_chunk)
     }
 
-    fn decoy_chunk(&self, chunk_index: usize) -> NamedQueryChunk {
-        let decoy = DecoyMarking::Decoy;
-        let seqs = self.get_chunk_str(chunk_index);
+    fn get_decoy_chunk(&self, chunk_index: usize) -> NamedQueryChunk {
+        let seqs = self.get_chunk_digests(chunk_index);
         let decoys = seqs
             .iter()
-            .map(|x| as_decoy_string(x))
+            .map(|x| x.as_decoy())
             .enumerate()
-            .filter(|(_i, x)| !self.digest_sequences.contains(&x.as_str()))
-            .collect::<Vec<(usize, String)>>();
+            .collect::<Vec<(usize, DigestSlice)>>();
+        // NOTE: RN I am not checking if the decoy is also a target ... bc its hard ...
+        // .filter(|(_i, x)| !self.digest_sequences.contains(&x.as_str()))
+
         let (eg_seq, eg_chunk, charge_chunk) = self
             .converter
             .convert_enumerated_sequences(&decoys)
             .unwrap();
-        NamedQueryChunk::new(eg_seq, decoy, charge_chunk, eg_chunk)
+        let eg_seq = eg_seq.into_iter().map(|x| x.clone()).collect();
+        NamedQueryChunk::new(eg_seq, charge_chunk, eg_chunk)
     }
 }
 
@@ -147,6 +177,39 @@ impl<'a> Iterator for DigestedSequenceIterator {
     fn next(&mut self) -> Option<Self::Item> {
         // If its an even iteration, we return the targets.
         // And if its an odd iteration, we return the decoys.
+        // IF the struct is requested to build decoys.
+        let mut decoy_batch = false;
+        let index_use;
+        if self.build_decoys {
+            index_use = self.iteration_index / 2;
+            let decoy_index = self.iteration_index % 2;
+            if decoy_index == 1 {
+                decoy_batch = true;
+            }
+            self.iteration_index += 1;
+        } else {
+            index_use = self.iteration_index;
+            self.iteration_index += 1;
+        }
+
+        let out = if decoy_batch {
+            self.get_decoy_chunk(index_use)
+        } else {
+            self.get_chunk(index_use)
+        };
+
+        if out.is_empty() { None } else { Some(out) }
+    }
+}
+
+impl<'a> ExactSizeIterator for DigestedSequenceIterator {
+    fn len(&self) -> usize {
+        let num_chunks = self.digest_sequences.len() / self.chunk_size;
+        if self.build_decoys {
+            num_chunks * 2
+        } else {
+            num_chunks
+        }
     }
 }
 
@@ -158,62 +221,19 @@ fn main_loop<'a>(
     tolerance: &'a DefaultTolerance,
     out_path: &Path,
 ) -> std::result::Result<(), TimsSeekError> {
-    let start = Instant::now();
     let tot_chunks = chunked_query_iterator.len();
     let mut chunk_num = 0;
 
     chunked_query_iterator.for_each(|chunk| {
-        log::info!("Chunk - Targets {}/{}", chunk_num, tot_chunks);
-        let out = process_chunk(
-            &chunk.queries,
-            &chunk.charges,
-            &chunk.names,
-            &index,
-            &factory,
-            &tolerance,
-            chunk.decoy,
-        );
-        let first_target = out[0].clone();
+        log::info!("Chunk {}/{}", chunk_num, tot_chunks);
+        let out = process_chunk(chunk, &index, &factory, &tolerance);
         println!("Chunk -Targets {}/{}", chunk_num, tot_chunks);
 
-        let out_path = out_path.join(format!("targets_chunk_{}.csv", chunk_num));
+        let out_path = out_path.join(format!("chunk_{}.csv", chunk_num));
         write_results_to_csv(&out, out_path).unwrap();
-        // log::info!("Chunk - Decoys {}/{}", chunk_num, tot_chunks);
 
-        // let decoys: Vec<String> = seq_chunk.iter().map(|x| as_decoy_string(x)).collect();
-        // let enum_decoy_str_slc = decoys
-        //     .iter()
-        //     .enumerate()
-        //     .map(|(i, x)| (i, x.as_str()))
-        //     .filter(|(_i, x)| !digest_sequences.contains(x))
-        //     .collect::<Vec<(usize, &str)>>();
-
-        // log::info!("Number of Decoys to process: {}", enum_decoy_str_slc.len());
-
-        // let decoy_str_slc = enum_decoy_str_slc
-        //     .iter()
-        //     .map(|x| x.1)
-        //     .collect::<Vec<&str>>();
-        // let (decoy_eg_chunk, decoy_crg_chunk) = def_converter
-        //     .convert_enumerated_sequences(&enum_decoy_str_slc)
-        //     .unwrap();
-        // let out = process_chunk(
-        //     &decoy_eg_chunk,
-        //     &decoy_crg_chunk,
-        //     &decoy_str_slc,
-        //     &index,
-        //     &factory,
-        //     &tolerance,
-        // );
-        // let first_decoy = out[0].clone();
-        // println!("Chunk - Decoys {}/{}", chunk_num, tot_chunks);
-
-        // let out_path = out_path.join(format!("decoys_chunk_{}.csv", chunk_num));
-        // write_results_to_csv(&out, out_path).unwrap();
-
-        println!("First target in chunk: {:#?}", first_target);
-        // println!("First decoy in chunk: {:#?}", first_decoy);
-
+        let first_target = out[0].clone();
+        println!("First query in chunk: {:#?}", first_target);
         chunk_num += 1;
     });
     Ok(())
@@ -246,20 +266,15 @@ fn main() -> std::result::Result<(), TimsSeekError> {
         fasta_location, digestion_params
     );
     let fasta_proteins = ProteinSequenceCollection::from_fasta_file(fasta_location)?;
-    let sequences: Vec<&str> = fasta_proteins
+    let sequences: Vec<Arc<str>> = fasta_proteins
         .sequences
         .iter()
-        .map(|x| x.sequence.as_str())
+        .map(|x| x.sequence.clone())
         .collect();
 
     let start = Instant::now();
-    let digest_sequences: HashSet<&str> = digestion_params
-        .digest_multiple(&sequences)
-        .iter()
-        .map(|x| Into::<String>::into(x))
-        .collect();
-
-    let digest_sequences: Vec<&str> = digest_sequences.iter().cloned().collect();
+    let digest_sequences: Vec<DigestSlice> =
+        deduplicate_digests(digestion_params.digest_multiple(&sequences));
 
     let elap_time = start.elapsed();
     let time_per_digest = elap_time / digest_sequences.len() as u32;
@@ -295,8 +310,13 @@ fn main() -> std::result::Result<(), TimsSeekError> {
         std::fs::create_dir(target_dir)?;
     }
 
+    const CHUNK_SIZE: usize = 1000;
+    const BUILD_DECOYS: bool = true;
+    let chunked_query_iterator =
+        DigestedSequenceIterator::new(digest_sequences, CHUNK_SIZE, def_converter, BUILD_DECOYS);
+
     main_loop(
-        &chunked_query_iterator,
+        chunked_query_iterator,
         &index,
         &factory,
         &tolerance,

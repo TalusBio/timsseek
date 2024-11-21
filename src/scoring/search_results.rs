@@ -1,4 +1,5 @@
 use serde::Serialize;
+use crate::digest::digestion::DigestSlice;
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
 use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::multi_chromatogram_agg::{NaturalFinalizedMultiCMGStatsArrays, ApexScores};
 use timsquery::ElutionGroup;
@@ -16,18 +17,18 @@ pub struct PrecursorData {
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub struct IonSearchResults<'a> {
-    pub sequence: &'a str,
+pub struct IonSearchResults {
+    pub sequence: DigestSlice,
     pub score_data: ApexScores,
     pub precursor_data: PrecursorData,
     pub decoy: DecoyMarking,
 }
 
-impl<'a> IonSearchResults<'a> {
+impl IonSearchResults {
     pub fn new(
-        sequence: &'a str,
+        digest_sequence: DigestSlice,
         charge: u8,
-        elution_group: &'a ElutionGroup<SafePosition>,
+        elution_group: &ElutionGroup<SafePosition>,
         finalized_scores: NaturalFinalizedMultiCMGStatsArrays<SafePosition>,
         decoy: DecoyMarking,
     ) -> Self {
@@ -41,7 +42,7 @@ impl<'a> IonSearchResults<'a> {
         };
 
         Self {
-            sequence,
+            sequence: digest_sequence,
             score_data,
             precursor_data,
             decoy,
@@ -63,21 +64,21 @@ impl<'a> IonSearchResults<'a> {
         let mut out: [String; 22] = core::array::from_fn(|_| "".to_string());
         let lab_sec = self.get_csv_record_lab_sec();
         let mut offset = 0;
-        offset += lab_sec.len();
-        for (i, x) in lab_sec.into_iter().enumerate() {
-            out[i + offset] = x;
+        for x in lab_sec.into_iter() {
+            out[offset] = x;
+            offset += 1;
         }
 
         let ms1_sec = self.get_csv_record_ms1_score_sec();
-        offset += ms1_sec.len();
-        for (i, x) in ms1_sec.into_iter().enumerate() {
-            out[i + offset] = x;
+        for x in ms1_sec.into_iter() {
+            out[offset] = x;
+            offset += 1;
         }
 
         let ms2_sec = self.get_csv_record_ms2_score_sec();
-        offset += ms2_sec.len();
-        for (i, x) in ms2_sec.into_iter().enumerate() {
-            out[i + offset] = x;
+        for x in ms2_sec.into_iter() {
+            out[offset] = x;
+            offset += 1;
         }
 
         assert!(offset == 22);
@@ -97,7 +98,7 @@ impl<'a> IonSearchResults<'a> {
 
     fn get_csv_record_lab_sec(&self) -> [String; 6] {
         [
-            self.sequence.to_string(),
+            self.sequence.clone().into(),
             self.precursor_data.mz.to_string(),
             self.precursor_data.charge.to_string(),
             self.precursor_data.mobility.to_string(),
