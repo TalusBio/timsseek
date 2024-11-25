@@ -6,6 +6,7 @@ pub enum TimsSeekError {
     TimsRust(TimsRustError),
     Timsquery(TimsqueryError),
     Io(std::io::Error),
+    ParseError { msg: String },
 }
 
 impl std::fmt::Display for TimsSeekError {
@@ -31,5 +32,11 @@ impl From<TimsRustError> for TimsSeekError {
 impl From<TimsqueryError> for TimsSeekError {
     fn from(x: TimsqueryError) -> Self {
         Self::Timsquery(x)
+    }
+}
+
+impl From<std::num::ParseIntError> for TimsSeekError {
+    fn from(x: std::num::ParseIntError) -> Self {
+        Self::ParseError { msg: x.to_string() }
     }
 }

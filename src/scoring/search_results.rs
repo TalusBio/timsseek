@@ -1,5 +1,6 @@
 use serde::Serialize;
-use crate::digest::digestion::DigestSlice;
+use crate::errors::TimsSeekError;
+use crate::models::DigestSlice;
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
 use timsquery::models::aggregators::raw_peak_agg::multi_chromatogram_agg::multi_chromatogram_agg::{NaturalFinalizedMultiCMGStatsArrays, ApexScores};
 use timsquery::ElutionGroup;
@@ -31,9 +32,9 @@ impl IonSearchResults {
         elution_group: &ElutionGroup<SafePosition>,
         finalized_scores: NaturalFinalizedMultiCMGStatsArrays<SafePosition>,
         decoy: DecoyMarking,
-    ) -> Self {
+    ) -> Result<Self, TimsSeekError> {
         // let score_data = ScoreData::new(finalized_scores, elution_group);
-        let score_data = finalized_scores.finalized_score().unwrap();
+        let score_data = finalized_scores.finalized_score()?;
         let precursor_data = PrecursorData {
             charge,
             mz: elution_group.precursor_mzs[0],
@@ -41,12 +42,12 @@ impl IonSearchResults {
             rt: elution_group.rt_seconds,
         };
 
-        Self {
+        Ok(Self {
             sequence: digest_sequence,
             score_data,
             precursor_data,
             decoy,
-        }
+        })
     }
 
     pub fn get_csv_labels() -> [&'static str; 22] {

@@ -1,7 +1,7 @@
 use super::fragment_mass_builder::FragmentMassBuilder;
-use crate::digest::digestion::DigestSlice;
 use crate::fragment_mass::fragment_mass_builder::SafePosition;
 use crate::isotopes::peptide_isotopes;
+use crate::models::DigestSlice;
 use log::{
     error,
     warn,

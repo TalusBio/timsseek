@@ -11,18 +11,17 @@ use timsquery::traits::tolerance::{
     DefaultTolerance, MobilityTolerance, MzToleramce, QuadTolerance, RtTolerance,
 };
 use timsquery::ElutionGroup;
-use timsseek::digest::digestion::{as_decoy_string, DigestSlice, deduplicate_digests};
 use timsseek::digest::digestion::{DigestionEnd, DigestionParameters, DigestionPattern};
 use timsseek::errors::TimsSeekError;
 use timsseek::fragment_mass::elution_group_converter::SequenceToElutionGroupConverter;
 use timsseek::fragment_mass::fragment_mass_builder::SafePosition;
 use timsseek::protein::fasta::ProteinSequenceCollection;
 use timsseek::scoring::search_results::{IonSearchResults, write_results_to_csv};
-use timsseek::models::DecoyMarking;
+use timsseek::models::{DigestSlice, deduplicate_digests, NamedQueryChunk};
 use core::marker::Send;
-use rayon::vec::IntoIter as RayonVecIntoIter;
-use rayon::iter::Zip as RayonZip;
 use std::sync::Arc;
+use rayon::prelude::*;
+use timsseek::data_sources::speclib::Speclib;
 
 fn process_chunk<'a>(
     queries: NamedQueryChunk,
@@ -40,16 +39,34 @@ fn process_chunk<'a>(
 
     let start = Instant::now();
 
-    let (out, main_scores): (Vec<IonSearchResults>, Vec<f64>) = res
+    let tmp: Vec<(IonSearchResults, f64)> = res
         .into_par_iter()
         .zip(queries.into_zip_par_iter())
         .map(|(res_elem, (eg_elem, (digest, charge_elem)))| {
             let decoy = digest.decoy;
-            let res = IonSearchResults::new(digest, charge_elem, &eg_elem, res_elem, decoy);
+            let res = IonSearchResults::new(digest.clone(), charge_elem, &eg_elem, res_elem, decoy);
+            if res.is_err() {
+                log::error!(
+                    "Error creating Digest: {:#?} \nElutionGroup: {:#?}\n Error: {:?}",
+                    digest,
+                    eg_elem,
+                    res,
+                );
+                return None;
+            }
+            let res = res.unwrap();
             let main_score = res.score_data.main_score;
-            (res, main_score)
+            Some((res, main_score))
         })
-        .unzip();
+        .flatten()
+        .collect();
+
+    if tmp.is_empty() {
+        // TODO: Remove this and check the error elsewhere.
+        panic!("No results found");
+    }
+
+    let (out, main_scores): (Vec<IonSearchResults>, Vec<f64>) = tmp.into_iter().unzip();
 
     let avg_main_scores = main_scores.iter().sum::<f64>() / main_scores.len() as f64;
 
@@ -63,53 +80,6 @@ fn process_chunk<'a>(
     log::info!("Avg main score: {:?}", avg_main_scores);
 
     out
-}
-
-#[derive(Debug, Clone)]
-struct NamedQueryChunk {
-    digests: Vec<DigestSlice>,
-    charges: Vec<u8>,
-    queries: Vec<ElutionGroup<SafePosition>>,
-}
-
-impl NamedQueryChunk {
-    fn new(
-        digests: Vec<DigestSlice>,
-        charges: Vec<u8>,
-        queries: Vec<ElutionGroup<SafePosition>>,
-    ) -> Self {
-        assert_eq!(digests.len(), charges.len());
-        assert_eq!(digests.len(), queries.len());
-        Self {
-            digests,
-            charges,
-            queries,
-        }
-    }
-
-    fn into_zip_par_iter(
-        self,
-    ) -> RayonZip<
-        RayonVecIntoIter<ElutionGroup<SafePosition>>,
-        RayonZip<RayonVecIntoIter<DigestSlice>, RayonVecIntoIter<u8>>,
-    > {
-        // IN THEORY I should implement IntoIter for this struct
-        // but I failed at it (skill issues?) so this will do for now.
-        // JSPP - 2024-11-21
-        self.queries.into_par_iter().zip(
-            self.digests
-                .into_par_iter()
-                .zip(self.charges.into_par_iter()),
-        )
-    }
-
-    fn len(&self) -> usize {
-        self.queries.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.queries.is_empty()
-    }
 }
 
 struct DigestedSequenceIterator {
@@ -142,13 +112,18 @@ impl DigestedSequenceIterator {
     fn get_chunk_digests(&self, chunk_index: usize) -> &[DigestSlice] {
         let start = chunk_index * self.chunk_size;
         let end = start + self.chunk_size;
+        let end = if end > self.digest_sequences.len() {
+            self.digest_sequences.len()
+        } else {
+            end
+        };
         &self.digest_sequences[start..end]
     }
 
     fn get_chunk(&self, chunk_index: usize) -> NamedQueryChunk {
         let seqs = self.get_chunk_digests(chunk_index);
         let (eg_seq, eg_chunk, charge_chunk) = self.converter.convert_sequences(seqs).unwrap();
-        let eg_seq = eg_seq.into_iter().map(|x| x.clone()).collect();
+        let eg_seq = eg_seq.into_iter().cloned().collect();
         NamedQueryChunk::new(eg_seq, charge_chunk, eg_chunk)
     }
 
@@ -166,12 +141,12 @@ impl DigestedSequenceIterator {
             .converter
             .convert_enumerated_sequences(&decoys)
             .unwrap();
-        let eg_seq = eg_seq.into_iter().map(|x| x.clone()).collect();
+        let eg_seq = eg_seq.into_iter().cloned().collect();
         NamedQueryChunk::new(eg_seq, charge_chunk, eg_chunk)
     }
 }
 
-impl<'a> Iterator for DigestedSequenceIterator {
+impl Iterator for DigestedSequenceIterator {
     type Item = NamedQueryChunk;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -198,11 +173,15 @@ impl<'a> Iterator for DigestedSequenceIterator {
             self.get_chunk(index_use)
         };
 
-        if out.is_empty() { None } else { Some(out) }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
     }
 }
 
-impl<'a> ExactSizeIterator for DigestedSequenceIterator {
+impl ExactSizeIterator for DigestedSequenceIterator {
     fn len(&self) -> usize {
         let num_chunks = self.digest_sequences.len() / self.chunk_size;
         if self.build_decoys {
@@ -249,10 +228,14 @@ fn main() -> std::result::Result<(), TimsSeekError> {
     // let fasta_location = "/Users/sebastianpaez/Downloads/UP000464024_2697049.fasta";
 
     // Human
-    // let fasta_location = "/Users/sebastianpaez/git/ionmesh/benchmark/UP000005640_9606.fasta";
+    let fasta_location = "/Users/sebastianpaez/git/ionmesh/benchmark/UP000005640_9606.fasta";
+    let speclib_loc = "/Users/sebastianpaez/git/timsseek/speclib_build/FUUUUU.ndjson";
 
     // Only HeLa proteins fasta
-    let fasta_location = "/Users/sebastianpaez/git/timsseek/data/HeLa_cannonical_proteins.fasta";
+    // let fasta_location = "/Users/sebastianpaez/git/timsseek/data/HeLa_cannonical_proteins.fasta";
+    // let speclib_loc = "/Users/sebastianpaez/git/timsseek/speclib_build/FUUUUU_small.ndjson";
+
+    let speclib = Speclib::from_ndjson_file(&Path::new(speclib_loc))?;
 
     let digestion_params = DigestionParameters {
         min_length: 6,
@@ -309,12 +292,26 @@ fn main() -> std::result::Result<(), TimsSeekError> {
     if !target_dir.exists() {
         std::fs::create_dir(target_dir)?;
     }
+    let speclib_target_dir = std::path::Path::new("./speclib_results/");
+    if !speclib_target_dir.exists() {
+        std::fs::create_dir(speclib_target_dir)?;
+    }
 
     const CHUNK_SIZE: usize = 1000;
     const BUILD_DECOYS: bool = true;
     let chunked_query_iterator =
         DigestedSequenceIterator::new(digest_sequences, CHUNK_SIZE, def_converter, BUILD_DECOYS);
 
+    let speclib_iter = speclib.as_iterator(CHUNK_SIZE);
+    main_loop(
+        speclib_iter,
+        &index,
+        &factory,
+        &tolerance,
+        &speclib_target_dir,
+    )?;
+
+    todo!();
     main_loop(
         chunked_query_iterator,
         &index,
