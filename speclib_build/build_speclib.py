@@ -154,11 +154,9 @@ def test_peptide_isotopes():
 """
 
 
-def get_human_peptides():
+def get_human_peptides(fasta_file: str) -> List[str]:
     print("Cleaving the proteins with trypsin...")
     unique_peptides = set()
-    fasta_file = "/Users/sebastianpaez/fasta/20231030_UP000005640_9606.fasta"
-    # fasta_file = "/Users/sebastianpaez/git/timsseek/data/HeLa_cannonical_proteins.fasta"
     with open(fasta_file) as file:
         for description, sequence in fasta.FASTA(file):
             new_peptides = parser.cleave(
@@ -166,7 +164,7 @@ def get_human_peptides():
                 "trypsin",
                 min_length=6,
                 max_length=20,
-                missed_cleavages=0,
+                missed_cleavages=1,
             )
             unique_peptides.update(new_peptides)
 
@@ -205,12 +203,17 @@ def yield_as_decoys(peptides: List[str]) -> Generator[str, None, None]:
         yield as_decoy(peptide)
 
 
+def yield_with_mods(peptides: List[str]) -> Generator[str, None, None]:
+    for peptide in peptides:
+        yield peptide.replace("C", "C[UNIMOD:4]")
+
+
 def yield_with_charges(
     peptides, min_charge, max_charge
 ) -> Generator[Tuple[str, int], None, None]:
     for peptide in peptides:
         for charge in range(min_charge, max_charge + 1):
-            yield (peptide, charge)
+            yield (peptide, charge, 26.0)
 
 
 PROTON_MASS = 1.007276466
@@ -287,11 +290,30 @@ def as_entry(
     return {"precursor": precursor, "elution_group": elution_group}
 
 
+def build_parser():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--fasta_file",
+        type=str,
+        default="/Users/sebastianpaez/fasta/20231030_UP000005640_9606.fasta",
+    )
+    parser.add_argument("--outfile", type=str, default="FUUUUU.ndjson")
+    return parser
+
+
 def foo():
-    # outfile = "FUUUUU_small.ndjson"
-    outfile = "FUUUUU.ndjson"
+    args = build_parser().parse_args()
+    fasta_file = args.fasta_file
+    outfile = args.outfile
     pretty_outfile = f"{outfile}.pretty.json"
-    peps = get_human_peptides()
+
+    # # outfile = "FUUUUU_small.ndjson"
+    # outfile = "FUUUUU.ndjson"
+    # fasta_file = "/Users/sebastianpaez/fasta/20231030_UP000005640_9606.fasta"
+    # # fasta_file = "/Users/sebastianpaez/git/timsseek/data/HeLa_cannonical_proteins.fasta"
+    peps = get_human_peptides(fasta_file=fasta_file)
     decoys = list(yield_as_decoys(peps))
 
     pretty_outs = []
@@ -300,7 +322,7 @@ def foo():
 
     pprint(f"Writing output to file: { outfile }")
     with open(outfile, "w") as file:
-        targ_use = list(yield_with_charges(peps, 2, 3))
+        targ_use = list(yield_with_charges(yield_with_mods(peps), 2, 3))
         for x in tqdm(
             model.predict_batched_annotated(
                 targ_use,

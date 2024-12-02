@@ -173,11 +173,7 @@ impl Iterator for DigestedSequenceIterator {
             self.get_chunk(index_use)
         };
 
-        if out.is_empty() {
-            None
-        } else {
-            Some(out)
-        }
+        if out.is_empty() { None } else { Some(out) }
     }
 }
 
@@ -229,7 +225,7 @@ fn main() -> std::result::Result<(), TimsSeekError> {
 
     // Human
     let fasta_location = "/Users/sebastianpaez/git/ionmesh/benchmark/UP000005640_9606.fasta";
-    let speclib_loc = "/Users/sebastianpaez/git/timsseek/speclib_build/FUUUUU.ndjson";
+    let speclib_loc = "speclib_build/20231030_UP000005640_9606.speclib.ndjson";
 
     // Only HeLa proteins fasta
     // let fasta_location = "/Users/sebastianpaez/git/timsseek/data/HeLa_cannonical_proteins.fasta";
