@@ -1,3 +1,4 @@
+use crate::errors::TimsSeekError;
 use rustyms::error::{
     Context,
     CustomError,
@@ -16,13 +17,16 @@ use rustyms::{
     LinearPeptide,
     Model,
 };
-use serde::Serialize;
+use serde::{
+    Deserialize,
+    Serialize,
+};
 use std::fmt::Display;
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SafePosition {
     pub series_id: u8,
-    pub series_number: u32,
+    pub series_number: u16,
     pub charge: u8,
 }
 
@@ -35,16 +39,30 @@ impl Serialize for SafePosition {
     }
 }
 
+/// Deserializes simple annotations for fragments.
+///
+/// b12^3 -> b12 charge 3
+/// b13 -> b13 charge 1
+impl<'de> Deserialize<'de> for SafePosition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::from_str(&s).map_err(serde::de::Error::custom)
+    }
+}
+
 impl SafePosition {
     fn new(x: FragmentType, charge: u8) -> Result<Self, CustomError> {
         let (series_id, series_number) = match x {
-            FragmentType::a(position) => (b'a', position.series_number as u32),
-            FragmentType::b(position) => (b'b', position.series_number as u32),
-            FragmentType::c(position) => (b'c', position.series_number as u32),
-            FragmentType::d(position) => (b'd', position.series_number as u32),
-            FragmentType::x(position) => (b'x', position.series_number as u32),
-            FragmentType::y(position) => (b'y', position.series_number as u32),
-            FragmentType::z(position) => (b'z', position.series_number as u32),
+            FragmentType::a(position) => (b'a', position.series_number as u16),
+            FragmentType::b(position) => (b'b', position.series_number as u16),
+            FragmentType::c(position) => (b'c', position.series_number as u16),
+            FragmentType::d(position) => (b'd', position.series_number as u16),
+            FragmentType::x(position) => (b'x', position.series_number as u16),
+            FragmentType::y(position) => (b'y', position.series_number as u16),
+            FragmentType::z(position) => (b'z', position.series_number as u16),
             FragmentType::precursor => (0, 0),
             _ => {
                 return Err(CustomError::error(
@@ -58,6 +76,34 @@ impl SafePosition {
         Ok(Self {
             series_id,
             series_number,
+            charge,
+        })
+    }
+
+    pub fn from_str(s: &str) -> Result<Self, TimsSeekError> {
+        let (rest, charge) = match s.split_once('^') {
+            Some((rest, charge)) => {
+                let charge = charge.parse::<u8>()?;
+                (rest, charge)
+            }
+            None => (s, 1),
+        };
+
+        // "b12" split into "b" and "12"
+        let (series, ordinal) = match rest.split_at(1) {
+            (series_chunk, series_ordinal) => {
+                let series_id = series_chunk.chars().next().unwrap() as u8;
+                let series_ordinal = series_ordinal.parse::<u16>()?;
+                (series_id, series_ordinal)
+            }
+            _ => {
+                return Err(TimsSeekError::ParseError { msg: s.to_string() });
+            }
+        };
+
+        Ok(Self {
+            series_id: series,
+            series_number: ordinal,
             charge,
         })
     }
@@ -81,40 +127,6 @@ pub struct FragmentMassBuilder {
 
 impl Default for FragmentMassBuilder {
     fn default() -> Self {
-        // let b_ions = Model {
-        //     a: (Location::None, Vec::new()),
-        //     b: (
-        //         Location::SkipNC(2, 2),
-        //         vec![],
-        //         // Do I want to remove
-        //         // neutral losses?
-        //     ),
-        //     c: (Location::None, Vec::new()),
-        //     d: (Location::None, Vec::new()),
-        //     v: (Location::None, Vec::new()),
-        //     w: (Location::None, Vec::new()),
-        //     x: (Location::None, Vec::new()),
-        //     y: (Location::None, Vec::new()),
-        //     z: (Location::None, Vec::new()),
-        //     precursor: vec![],
-        //     ppm: MassOverCharge::new::<mz>(20.0),
-        //     glycan_fragmentation: None,
-        // };
-
-        // let y_ions = Model {
-        //     a: (Location::None, Vec::new()),
-        //     b: (Location::None, Vec::new()),
-        //     c: (Location::None, Vec::new()),
-        //     d: (Location::None, Vec::new()),
-        //     v: (Location::None, Vec::new()),
-        //     w: (Location::None, Vec::new()),
-        //     x: (Location::None, Vec::new()),
-        //     y: (Location::SkipNC(2, 2), vec![]),
-        //     z: (Location::None, Vec::new()),
-        //     precursor: vec![],
-        //     ppm: MassOverCharge::new::<mz>(20.0),
-        //     glycan_fragmentation: None,
-        // };
         let by_ions = Model {
             a: (Location::None, Vec::new()),
             b: (Location::SkipNC(2, 2), vec![]),
@@ -168,5 +180,20 @@ impl FragmentMassBuilder {
                 ))
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize() {
+        let ser = "b12^3";
+        let deser = SafePosition::from_str(ser).unwrap();
+
+        assert_eq!(deser.series_id, b'b');
+        assert_eq!(deser.series_number, 12);
+        assert_eq!(deser.charge, 3);
     }
 }

@@ -1,5 +1,10 @@
+use crate::models::{
+    DecoyMarking,
+    DigestSlice,
+};
 use regex::Regex;
 use std::ops::Range;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum DigestionEnd {
@@ -75,13 +80,13 @@ impl DigestionParameters {
         sites
     }
 
-    pub fn digest<'a>(&self, sequence: &'a str) -> Vec<Digest<'a>> {
-        let sites = self.cleavage_sites(sequence);
+    pub fn digest(&self, sequence: Arc<str>) -> Vec<DigestSlice> {
+        let sites = self.cleavage_sites(sequence.as_ref());
         let num_sites = sites.len();
         (0..sites.len())
             .flat_map(|i| {
                 let start = sites[i].start;
-                let local_out: Vec<Digest> = (0..(self.max_missed_cleavages + 1))
+                let local_out: Vec<DigestSlice> = (0..(self.max_missed_cleavages + 1))
                     .filter_map(|j| {
                         if i + j > num_sites - 1 {
                             return None;
@@ -92,9 +97,11 @@ impl DigestionParameters {
                         if span < self.min_length || span > self.max_length {
                             return None;
                         }
-                        Some(Digest {
-                            sequence: &sequence[start..end],
-                        })
+                        Some(DigestSlice::new(
+                            sequence.clone(),
+                            start..end,
+                            DecoyMarking::Target,
+                        ))
                     })
                     .collect();
                 local_out
@@ -102,31 +109,12 @@ impl DigestionParameters {
             .collect()
     }
 
-    pub fn digest_multiple<'a>(&self, sequences: &[&'a str]) -> Vec<Digest<'a>> {
-        sequences.iter().flat_map(|seq| self.digest(seq)).collect()
+    pub fn digest_multiple(&self, sequences: &[Arc<str>]) -> Vec<DigestSlice> {
+        sequences
+            .iter()
+            .flat_map(|seq| self.digest(seq.clone()))
+            .collect()
     }
-}
-
-#[derive(Debug)]
-pub struct Digest<'a> {
-    pub sequence: &'a str,
-}
-
-impl<'a> Digest<'a> {
-    pub fn as_decoy_string(&self) -> String {
-        as_decoy_string(self.sequence)
-    }
-}
-
-pub fn as_decoy_string(sequence: &str) -> String {
-    let mut sequence = sequence.to_string();
-    let inner_rev = sequence[1..(sequence.len() - 1)]
-        .chars()
-        .rev()
-        .collect::<String>();
-    sequence.replace_range(1..(sequence.len() - 1), &inner_rev);
-
-    sequence
 }
 
 #[cfg(test)]
@@ -163,12 +151,12 @@ mod tests {
             digestion_end: DigestionEnd::CTerm,
             max_missed_cleavages: 0,
         };
-        let seq = "PEPTIKDEPINK";
+        let seq: Arc<str> = "PEPTIKDEPINK".into();
         let digests = params.digest(seq);
         assert_eq!(digests.len(), 2);
-        assert_eq!(digests[0].sequence.len(), 6);
-        assert_eq!(digests[0].sequence, "PEPTIK");
-        assert_eq!(digests[1].sequence, "DEPINK");
+        assert_eq!(digests[0].len(), 6);
+        assert_eq!(Into::<String>::into(digests[0].clone()), "PEPTIK");
+        assert_eq!(Into::<String>::into(digests[1].clone()), "DEPINK");
     }
 
     #[test]
@@ -180,22 +168,12 @@ mod tests {
             digestion_end: DigestionEnd::NTerm,
             max_missed_cleavages: 1,
         };
-        let seq = "PEPTIKDEPINK";
+        let seq: Arc<str> = "PEPTIKDEPINK".into();
         let digests = params.digest(seq);
         assert_eq!(digests.len(), 3, "Expected 3 digests, got: {:?}", digests);
-        assert_eq!(digests[0].sequence.len(), 5);
-        assert_eq!(digests[0].sequence, "PEPTI");
-        assert_eq!(digests[1].sequence, "KDEPIN");
-        assert_eq!(digests[2].sequence, "KDEPINK");
-    }
-
-    #[test]
-    fn test_decoy() {
-        let my_digest = Digest {
-            sequence: "PEPTIDEPINK",
-        };
-        let decoy = my_digest.as_decoy_string();
-        assert_eq!(my_digest.sequence, "PEPTIDEPINK");
-        assert_eq!(decoy, "PNIPEDITPEK");
+        assert_eq!(digests[0].len(), 5);
+        assert_eq!(Into::<String>::into(digests[0].clone()), "PEPTI");
+        assert_eq!(Into::<String>::into(digests[1].clone()), "KDEPIN");
+        assert_eq!(Into::<String>::into(digests[2].clone()), "KDEPINK");
     }
 }

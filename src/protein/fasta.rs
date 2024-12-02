@@ -30,6 +30,8 @@ impl ProteinSequenceNmerIndex {
             let sequence = sequence.sequence.as_bytes();
 
             sequence.windows(nmer_size).for_each(|window| {
+                // I am pretty sure this clones the content of each window.
+                // RN this is not a problem but COULD be better.
                 let key = Arc::from(window);
                 index
                     .entry(key)
@@ -162,10 +164,13 @@ PEPTIDEPLNK
         println!("{:?}", fasta);
         assert_eq!(fasta.sequences.len(), 2);
         assert_eq!(
-            fasta.sequences[0].sequence,
+            fasta.sequences[0].sequence.as_ref(),
             "PEPTIDEPINKPEPTIDEPINKPEPTIDEPINKPEPTIDEPINK"
         );
-        assert_eq!(fasta.sequences[1].sequence, "PEPTIDEPLNKPEPTIDEPLNK");
+        assert_eq!(
+            fasta.sequences[1].sequence.as_ref(),
+            "PEPTIDEPLNKPEPTIDEPLNK"
+        );
         assert_eq!(fasta.sequences[0].description, "mysupercoolprotein");
         assert_eq!(fasta.sequences[1].description, "mysupercoolprotein2");
     }

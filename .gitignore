@@ -1,6 +1,16 @@
 
+*_bkp/
+*_bak/
+*.bkp/
+*.bak/
+**/.venv/
+.venv/
+.task/
+
+venv/
 target/
 results/
+*results/
 results_bak*/
 flamegraph.svg
 cargo-flamegraph.stacks
