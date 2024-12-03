@@ -13,5 +13,5 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-elfragmentadonnx = { path = "/Users/sebastianpaez/git/2024_dev_talus_prospect/python_packages/dist/elfragmentadonnx-0.21.25-py3-none-any.whl" }
-elfragmentador_core = { path = "/Users/sebastianpaez/git/2024_dev_talus_prospect/python_packages/dist/elfragmentador_core-0.21.25-py3-none-any.whl" }
+elfragmentadonnx = { path = "/Users/sebastianpaez/git/2024_dev_talus_prospect/python_packages/dist/elfragmentadonnx-0.22.0-py3-none-any.whl" }
+elfragmentador_core = { path = "/Users/sebastianpaez/git/2024_dev_talus_prospect/python_packages/dist/elfragmentador_core-0.22.0-py3-none-any.whl" }

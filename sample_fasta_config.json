@@ -1,0 +1,24 @@
+{
+    "input": {
+        "type": "fasta",
+        "path": "./data/HeLa_cannonical_proteins.fasta",
+        "digestion": {
+            "min_length": 6,
+            "max_length": 20,
+            "max_missed_cleavages": 0,
+            "build_decoys": true
+        }
+    },
+    "analysis": {
+        "dotd_file": "./data/240402_PRTC_01_S1-A1_1_11342.d",
+        "chunk_size": 1000,
+        "tolerance": {
+            "ms_ppm": [15.0, 15.0],
+            "mobility_pct": [10.0, 10.0],
+            "quad_absolute": [0.1, 0.1]
+        }
+    },
+    "output": {
+        "directory": "./results/"
+    }
+}

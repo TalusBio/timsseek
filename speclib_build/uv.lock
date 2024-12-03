@@ -118,8 +118,8 @@ wheels = [
 
 [[package]]
 name = "elfragmentadonnx"
-version = "0.21.25"
-source = { path = "../../2024_dev_talus_prospect/python_packages/dist/elfragmentadonnx-0.21.25-py3-none-any.whl" }
+version = "0.22.0"
+source = { path = "../../2024_dev_talus_prospect/python_packages/dist/elfragmentadonnx-0.22.0-py3-none-any.whl" }
 dependencies = [
     { name = "elfragmentador-core" },
     { name = "numpy" },
@@ -130,7 +130,7 @@ dependencies = [
     { name = "rustyms" },
 ]
 wheels = [
-    { filename = "elfragmentadonnx-0.21.25-py3-none-any.whl", hash = "sha256:875c17337115274325a2bcac067ae059e2f10fd3057d247ac856167f6ef4e9de" },
+    { filename = "elfragmentadonnx-0.22.0-py3-none-any.whl", hash = "sha256:bdc14174dbfd9d448e763b89d95eb4bb8543d43e44a61608dd9a25b9ccce8757" },
 ]
 
 [package.metadata]
@@ -146,15 +146,15 @@ requires-dist = [
 
 [[package]]
 name = "elfragmentador-core"
-version = "0.21.25"
-source = { path = "../../2024_dev_talus_prospect/python_packages/dist/elfragmentador_core-0.21.25-py3-none-any.whl" }
+version = "0.22.0"
+source = { path = "../../2024_dev_talus_prospect/python_packages/dist/elfragmentador_core-0.22.0-py3-none-any.whl" }
 dependencies = [
     { name = "numpy" },
     { name = "requests" },
     { name = "rustyms" },
 ]
 wheels = [
-    { filename = "elfragmentador_core-0.21.25-py3-none-any.whl", hash = "sha256:cd383cf7b5836e256463b008f9a330d9401127b8a59c12f5c6203f32e6e6fd65" },
+    { filename = "elfragmentador_core-0.22.0-py3-none-any.whl", hash = "sha256:04a087a074b0657ab9f2a3394517eac5a7fa37b9970c14fa052f42e844448f81" },
 ]
 
 [package.metadata]
@@ -495,8 +495,8 @@ dependencies = [
 requires-dist = [
     { name = "boto3" },
     { name = "cloudpathlib", extras = ["s3"] },
-    { name = "elfragmentadonnx", path = "../../2024_dev_talus_prospect/python_packages/dist/elfragmentadonnx-0.21.25-py3-none-any.whl" },
-    { name = "elfragmentador-core", path = "../../2024_dev_talus_prospect/python_packages/dist/elfragmentador_core-0.21.25-py3-none-any.whl" },
+    { name = "elfragmentadonnx", path = "../../2024_dev_talus_prospect/python_packages/dist/elfragmentadonnx-0.22.0-py3-none-any.whl" },
+    { name = "elfragmentador-core", path = "../../2024_dev_talus_prospect/python_packages/dist/elfragmentador_core-0.22.0-py3-none-any.whl" },
     { name = "pyteomics" },
     { name = "rich" },
     { name = "tqdm" },
