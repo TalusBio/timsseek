@@ -28,6 +28,10 @@ use serde::{
     Serialize,
 };
 use std::path::PathBuf;
+use indicatif::ProgressIterator;
+use indicatif::{
+    ProgressStyle,
+};
 
 fn process_chunk<'a>(
     queries: NamedQueryChunk,
@@ -202,21 +206,20 @@ fn main_loop<'a>(
     tolerance: &'a DefaultTolerance,
     out_path: &Path,
 ) -> std::result::Result<(), TimsSeekError> {
-    let tot_chunks = chunked_query_iterator.len();
     let mut chunk_num = 0;
 
-    chunked_query_iterator.for_each(|chunk| {
-        log::info!("Chunk {}/{}", chunk_num, tot_chunks);
-        let out = process_chunk(chunk, &index, &factory, &tolerance);
-        println!("Chunk -Targets {}/{}", chunk_num, tot_chunks);
-
-        let out_path = out_path.join(format!("chunk_{}.csv", chunk_num));
-        write_results_to_csv(&out, out_path).unwrap();
-
-        let first_target = out[0].clone();
-        println!("First query in chunk: {:#?}", first_target);
-        chunk_num += 1;
-    });
+    let style = ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}], {eta})",
+    )
+    .unwrap();
+    chunked_query_iterator
+        .progress_with_style(style)
+        .for_each(|chunk| {
+            let out = process_chunk(chunk, &index, &factory, &tolerance);
+            let out_path = out_path.join(format!("chunk_{}.csv", chunk_num));
+            write_results_to_csv(&out, out_path).unwrap();
+            chunk_num += 1;
+        });
     Ok(())
 }
 
