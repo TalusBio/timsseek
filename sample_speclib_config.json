@@ -1,0 +1,18 @@
+{
+    "input": {
+        "type": "speclib",
+        "path": "speclib_build/20231030_UP000005640_9606.speclib.ndjson"
+    },
+    "analysis": {
+        "dotd_file": "/Users/sebastianpaez/git/ionmesh/benchmark/240402_PRTC_01_S1-A1_1_11342.d",
+        "chunk_size": 1000,
+        "tolerance": {
+            "ms_ppm": [15.0, 15.0],
+            "mobility_pct": [10.0, 10.0],
+            "quad_absolute": [0.1, 0.1]
+        }
+    },
+    "output": {
+        "directory": "./canon_results/"
+    }
+}

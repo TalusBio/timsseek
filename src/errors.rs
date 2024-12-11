@@ -1,3 +1,4 @@
+use serde_json;
 use timsquery::TimsqueryError;
 use timsrust::TimsRustError;
 
@@ -38,5 +39,13 @@ impl From<TimsqueryError> for TimsSeekError {
 impl From<std::num::ParseIntError> for TimsSeekError {
     fn from(x: std::num::ParseIntError) -> Self {
         Self::ParseError { msg: x.to_string() }
+    }
+}
+
+impl Into<TimsSeekError> for serde_json::Error {
+    fn into(self) -> TimsSeekError {
+        TimsSeekError::ParseError {
+            msg: self.to_string(),
+        }
     }
 }

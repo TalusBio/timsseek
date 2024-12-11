@@ -22,6 +22,16 @@ use core::marker::Send;
 use std::sync::Arc;
 use rayon::prelude::*;
 use timsseek::data_sources::speclib::Speclib;
+use clap::Parser;
+use serde::{
+    Deserialize,
+    Serialize,
+};
+use std::path::PathBuf;
+use indicatif::ProgressIterator;
+use indicatif::{
+    ProgressStyle,
+};
 
 fn process_chunk<'a>(
     queries: NamedQueryChunk,
@@ -196,21 +206,194 @@ fn main_loop<'a>(
     tolerance: &'a DefaultTolerance,
     out_path: &Path,
 ) -> std::result::Result<(), TimsSeekError> {
-    let tot_chunks = chunked_query_iterator.len();
     let mut chunk_num = 0;
+    let mut nqueries = 0;
+    let start = Instant::now();
 
-    chunked_query_iterator.for_each(|chunk| {
-        log::info!("Chunk {}/{}", chunk_num, tot_chunks);
-        let out = process_chunk(chunk, &index, &factory, &tolerance);
-        println!("Chunk -Targets {}/{}", chunk_num, tot_chunks);
+    let style = ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {eta})",
+    )
+    .unwrap();
+    chunked_query_iterator
+        .progress_with_style(style)
+        .for_each(|chunk| {
+            let out = process_chunk(chunk, &index, &factory, &tolerance);
+            nqueries += out.len();
+            let out_path = out_path.join(format!("chunk_{}.csv", chunk_num));
+            write_results_to_csv(&out, out_path).unwrap();
+            chunk_num += 1;
+        });
+    let elap_time = start.elapsed();
+    println!("Querying took {:?} for {} queries", elap_time, nqueries);
+    Ok(())
+}
 
-        let out_path = out_path.join(format!("chunk_{}.csv", chunk_num));
-        write_results_to_csv(&out, out_path).unwrap();
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// Path to the JSON configuration file
+    #[arg(short, long)]
+    config: PathBuf,
 
-        let first_target = out[0].clone();
-        println!("First query in chunk: {:#?}", first_target);
-        chunk_num += 1;
-    });
+    /// Path to the .d file (will over-write the config file)
+    #[arg(short, long)]
+    dotd_file: Option<PathBuf>,
+
+    /// Path to the speclib file (will over-write the config file)
+    #[arg(short, long)]
+    speclib_file: Option<PathBuf>,
+
+    /// Path to the output directory
+    #[arg(short, long)]
+    output_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Config {
+    /// Input configuration
+    input: InputConfig,
+
+    /// Analysis parameters
+    analysis: AnalysisConfig,
+
+    /// Output configuration
+    output: OutputConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum InputConfig {
+    #[serde(rename = "fasta")]
+    Fasta {
+        path: PathBuf,
+        digestion: DigestionConfig,
+    },
+    #[serde(rename = "speclib")]
+    Speclib { path: PathBuf },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AnalysisConfig {
+    /// Path to the .d file
+    dotd_file: Option<PathBuf>,
+
+    /// Processing parameters
+    chunk_size: usize,
+
+    /// Tolerance settings
+    tolerance: DefaultTolerance,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OutputConfig {
+    /// Directory for results
+    directory: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DigestionConfig {
+    min_length: u32,
+    max_length: u32,
+    max_missed_cleavages: u32,
+    build_decoys: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ToleranceConfig {
+    ms_ppm: (f64, f64),
+    mobility_pct: (f64, f64),
+    quad_absolute: (f64, f64),
+}
+
+impl Default for DigestionConfig {
+    fn default() -> Self {
+        Self {
+            min_length: 6,
+            max_length: 20,
+            max_missed_cleavages: 0,
+            build_decoys: true,
+        }
+    }
+}
+
+impl Default for ToleranceConfig {
+    fn default() -> Self {
+        Self {
+            ms_ppm: (15.0, 15.0),
+            mobility_pct: (10.0, 10.0),
+            quad_absolute: (0.1, 0.1),
+        }
+    }
+}
+
+fn process_fasta(
+    path: PathBuf,
+    index: &QuadSplittedTransposedIndex,
+    factory: &MultiCMGStatsFactory<SafePosition>,
+    digestion: DigestionConfig,
+    analysis: &AnalysisConfig,
+    output: &OutputConfig,
+) -> std::result::Result<(), TimsSeekError> {
+    let digestion_params = DigestionParameters {
+        min_length: digestion.min_length as usize,
+        max_length: digestion.max_length as usize,
+        pattern: DigestionPattern::trypsin(),
+        digestion_end: DigestionEnd::CTerm,
+        max_missed_cleavages: digestion.max_missed_cleavages as usize,
+    };
+
+    println!(
+        "Digesting {} with parameters: \n {:?}",
+        path.display(),
+        digestion_params
+    );
+
+    let fasta_proteins = ProteinSequenceCollection::from_fasta_file(&path)?;
+    let sequences: Vec<Arc<str>> = fasta_proteins
+        .sequences
+        .iter()
+        .map(|x| x.sequence.clone())
+        .collect();
+
+    let digest_sequences: Vec<DigestSlice> =
+        deduplicate_digests(digestion_params.digest_multiple(&sequences));
+
+    // ... rest of FASTA processing ...
+    let def_converter = SequenceToElutionGroupConverter::default();
+    let chunked_query_iterator = DigestedSequenceIterator::new(
+        digest_sequences,
+        analysis.chunk_size,
+        def_converter,
+        digestion.build_decoys,
+    );
+
+    main_loop(
+        chunked_query_iterator,
+        &index,
+        &factory,
+        &analysis.tolerance,
+        &output.directory,
+    )?;
+    Ok(())
+}
+
+fn process_speclib(
+    path: PathBuf,
+    index: &QuadSplittedTransposedIndex,
+    factory: &MultiCMGStatsFactory<SafePosition>,
+    analysis: &AnalysisConfig,
+    output: &OutputConfig,
+) -> std::result::Result<(), TimsSeekError> {
+    let speclib = Speclib::from_ndjson_file(&path)?;
+    let speclib_iter = speclib.as_iterator(analysis.chunk_size);
+
+    main_loop(
+        speclib_iter,
+        index,
+        &factory,
+        &analysis.tolerance,
+        &output.directory,
+    )?;
     Ok(())
 }
 
@@ -218,106 +401,62 @@ fn main() -> std::result::Result<(), TimsSeekError> {
     // Initialize logging
     env_logger::init();
 
-    // let fasta_location = "/Users/sebastianpaez/Downloads/UP000000625_83333.fasta";
+    // Parse command line arguments
+    let args = Cli::parse();
 
-    // Covid 19 fasta
-    // let fasta_location = "/Users/sebastianpaez/Downloads/UP000464024_2697049.fasta";
-
-    // Human
-    let fasta_location = "/Users/sebastianpaez/git/ionmesh/benchmark/UP000005640_9606.fasta";
-    let speclib_loc = "speclib_build/20231030_UP000005640_9606.speclib.ndjson";
-
-    // Only HeLa proteins fasta
-    // let fasta_location = "/Users/sebastianpaez/git/timsseek/data/HeLa_cannonical_proteins.fasta";
-    // let speclib_loc = "/Users/sebastianpaez/git/timsseek/speclib_build/FUUUUU_small.ndjson";
-
-    let speclib = Speclib::from_ndjson_file(&Path::new(speclib_loc))?;
-
-    let digestion_params = DigestionParameters {
-        min_length: 6,
-        max_length: 20,
-        pattern: DigestionPattern::trypsin(),
-        digestion_end: DigestionEnd::CTerm,
-        max_missed_cleavages: 0,
+    // Load and parse configuration
+    let config: Result<Config, _> = serde_json::from_reader(std::fs::File::open(args.config)?);
+    let mut config = match config {
+        Ok(x) => x,
+        Err(e) => {
+            return Err(TimsSeekError::ParseError { msg: e.to_string() });
+        }
     };
-    info!(
-        "Digesting {} with parameters: \n {:?}",
-        fasta_location, digestion_params
-    );
-    let fasta_proteins = ProteinSequenceCollection::from_fasta_file(fasta_location)?;
-    let sequences: Vec<Arc<str>> = fasta_proteins
-        .sequences
-        .iter()
-        .map(|x| x.sequence.clone())
-        .collect();
+    if let Some(dotd_file) = args.dotd_file {
+        config.analysis.dotd_file = Some(dotd_file);
+    }
+    if let Some(speclib_file) = args.speclib_file {
+        config.input = InputConfig::Speclib { path: speclib_file };
+    }
+    if let Some(output_dir) = args.output_dir {
+        config.output.directory = output_dir;
+    }
 
-    let start = Instant::now();
-    let digest_sequences: Vec<DigestSlice> =
-        deduplicate_digests(digestion_params.digest_multiple(&sequences));
+    println!("{:?}", config);
 
-    let elap_time = start.elapsed();
-    let time_per_digest = elap_time / digest_sequences.len() as u32;
-    info!("Digestion took {:?}", elap_time);
-    info!("Time per digestion: {:?}", time_per_digest);
-    info!(
-        "Digests per second: {:?}",
-        digest_sequences.len() as f32 / time_per_digest.as_secs_f32()
-    );
+    // Create output directory
+    std::fs::create_dir_all(&config.output.directory)?;
 
-    let def_converter = SequenceToElutionGroupConverter::default();
-
-    // ====================
-    let dotd_file_location =
-        "/Users/sebastianpaez/git/ionmesh/benchmark/240402_PRTC_01_S1-A1_1_11342.d";
-
-    let tolerance = DefaultTolerance {
-        ms: MzToleramce::Ppm((15.0, 15.0)),
-        rt: RtTolerance::None,
-        mobility: MobilityTolerance::Pct((10.0, 10.0)),
-        quad: QuadTolerance::Absolute((0.1, 0.1)),
-    };
-    // let index = QuadSplittedTransposedIndex::from_path(dotd_file_location)?;
-    let index = QuadSplittedTransposedIndex::from_path_centroided(dotd_file_location)?;
+    let dotd_file_location = &config.analysis.dotd_file;
+    let index = QuadSplittedTransposedIndex::from_path_centroided(
+        dotd_file_location
+            .clone()
+            .unwrap() // TODO: Error handling
+            .to_str()
+            .expect("Path is not convertable to string"),
+    )?;
 
     let factory = MultiCMGStatsFactory {
         converters: (index.mz_converter, index.im_converter),
         _phantom: std::marker::PhantomData::<SafePosition>,
     };
 
-    let target_dir = std::path::Path::new("./results/");
-    if !target_dir.exists() {
-        std::fs::create_dir(target_dir)?;
+    // Process based on input type
+    match config.input {
+        InputConfig::Fasta { path, digestion } => {
+            process_fasta(
+                path,
+                &index,
+                &factory,
+                digestion,
+                &config.analysis,
+                &config.output,
+            )?;
+        }
+        InputConfig::Speclib { path } => {
+            process_speclib(path, &index, &factory, &config.analysis, &config.output)?;
+        }
     }
-    let speclib_target_dir = std::path::Path::new("./speclib_results/");
-    if !speclib_target_dir.exists() {
-        std::fs::create_dir(speclib_target_dir)?;
-    }
 
-    const CHUNK_SIZE: usize = 1000;
-    const BUILD_DECOYS: bool = true;
-    let chunked_query_iterator =
-        DigestedSequenceIterator::new(digest_sequences, CHUNK_SIZE, def_converter, BUILD_DECOYS);
-
-    let speclib_iter = speclib.as_iterator(CHUNK_SIZE);
-    main_loop(
-        speclib_iter,
-        &index,
-        &factory,
-        &tolerance,
-        &speclib_target_dir,
-    )?;
-
-    todo!();
-    main_loop(
-        chunked_query_iterator,
-        &index,
-        &factory,
-        &tolerance,
-        &target_dir,
-    )?;
-    let elap_time = start.elapsed();
-    info!("Querying took {:?}", elap_time);
-
-    // println!("{:?}", out);
     Ok(())
 }

@@ -6,6 +6,7 @@ use crate::models::{
     DigestSlice,
     NamedQueryChunk,
 };
+use log::debug;
 use rayon::prelude::*;
 use serde::{
     Deserialize,
@@ -108,7 +109,7 @@ impl Speclib {
 
             if num_show > 0 {
                 num_show -= 1;
-                println!("{:?}", elem);
+                debug!("{:?}", elem);
             }
             charges.push(elem.precursor.charge);
             digests.push(elem.precursor.into());
