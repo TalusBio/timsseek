@@ -1,6 +1,6 @@
 import numpy as np
+from typing import Literal
 from typing import List, Tuple
-import sys
 from elfragmentadonnx.model import OnnxPeptideTransformer
 from typing import List, Tuple, Generator
 from tqdm.auto import tqdm
@@ -8,10 +8,15 @@ from rich.pretty import pprint
 import rustyms
 from pyteomics import fasta, parser
 import json
+import enum
 
 # This makes a lot slimmer the logging ingofrmation
 
 model = OnnxPeptideTransformer.default_model()
+
+MUTATE_DICT = {}
+for old, new in zip("GAVLIFMPWSCTYHKRQEND", "LLLVVLLLLTSSSSLLNDQE"):
+    MUTATE_DICT[old] = new
 
 
 def convolve(a: List[float], b: List[float]) -> List[float]:
@@ -193,14 +198,33 @@ def peptide_formula_dist(formula):
     return peptide_isotopes(c_count, s_count)
 
 
-def as_decoy(x: str) -> str:
-    out = x[0] + x[-2:0:-1] + x[-1]
+class DecoyStrategy(enum.Enum):
+    REVERSE = "REVERSE"
+    MUTATE = "MUTATE"
+    EDGE_MUTATE = "EDGE_MUTATE"
+
+
+def as_decoy(x: str, decoy_strategy: DecoyStrategy) -> str:
+    if decoy_strategy == DecoyStrategy.REVERSE:
+        out = x[0] + x[-2:0:-1] + x[-1]
+    elif decoy_strategy == DecoyStrategy.MUTATE:
+        out = "".join([MUTATE_DICT[w] for w in x])
+    elif decoy_strategy == DecoyStrategy.EDGE_MUTATE:
+        out = "".join([x[0] + MUTATE_DICT[x[1]] + x[2:-2] + MUTATE_DICT[x[-2]] + x[-1]])
+    else:
+        raise NotImplementedError(f"Unknown decoy strategy {decoy_strategy}")
     return out
 
 
-def yield_as_decoys(peptides: List[str]) -> Generator[str, None, None]:
+def yield_as_decoys(
+    peptides: List[str],
+    decoy_strategy: Literal[DecoyStrategy.MUTATE, DecoyStrategy.REVERSE],
+) -> Generator[str, None, None]:
     for peptide in peptides:
-        yield as_decoy(peptide)
+        try:
+            yield as_decoy(peptide, decoy_strategy)
+        except KeyError as e:
+            print(f"No decoy for {peptide} because KeyError: {e}")
 
 
 def yield_with_mods(peptides: List[str]) -> Generator[str, None, None]:
@@ -210,7 +234,7 @@ def yield_with_mods(peptides: List[str]) -> Generator[str, None, None]:
 
 def yield_with_charges(
     peptides, min_charge, max_charge
-) -> Generator[Tuple[str, int], None, None]:
+) -> Generator[Tuple[str, int, float], None, None]:
     for peptide in peptides:
         for charge in range(min_charge, max_charge + 1):
             yield (peptide, charge, 26.0)
@@ -239,9 +263,10 @@ def supersimpleprediction(mz, charge):
 
 def as_entry(
     peptide: rustyms.LinearPeptide,
-    ion_dict: dict[str, (float, float)],
+    ion_dict: dict[str, tuple[float, float]],
     decoy: bool,
     id: int,
+    max_keep: int = 20,
 ) -> dict | None:
     pep_formula = peptide.formula()[0]
     isotope_dist = peptide_formula_dist(pep_formula)
@@ -258,12 +283,20 @@ def as_entry(
         float(precursor_mzs + (neutron_fraction * isotope)) for isotope in [-1, 0, 1, 2]
     ]
 
-    max_intensity = max([v[1] for v in ion_dict.values()])
-    max_keep = max_intensity * 0.02
+    intensities = [v[1] for v in ion_dict.values()]
+    intensities.sort(reverse=True)
+    max_intensity = intensities[0]
+    min_inten_keep = max_intensity * 0.02
+    intensities = [x for x in intensities if x > min_inten_keep]
+    if len(intensities) > max_keep:
+        intensities = intensities[:max_keep]
+
+    min_inten_keep = intensities[-1]
+
     ion_dict = {
         k: v
         for k, v in ion_dict.items()
-        if (v[0] > 250) and (v[1] > max_keep) and (v[0] < 2000)
+        if (v[0] > 250) and (v[1] >= min_inten_keep) and (v[0] < 2000)
     }
 
     ion_mzs = {k: v[0] for k, v in ion_dict.items()}
@@ -299,14 +332,27 @@ def build_parser():
         type=str,
         default="/Users/sebastianpaez/fasta/20231030_UP000005640_9606.fasta",
     )
+    parser.add_argument("--decoy_strategy", type=str, default="REVERSE")
+    parser.add_argument("--max_ions", type=int, default=20)
     parser.add_argument("--outfile", type=str, default="FUUUUU.ndjson")
     return parser
 
 
 def foo():
     args = build_parser().parse_args()
+
+    if args.decoy_strategy == "REVERSE":
+        decoy_strategy = DecoyStrategy.REVERSE
+    elif args.decoy_strategy == "MUTATE":
+        decoy_strategy = DecoyStrategy.MUTATE
+    elif args.decoy_strategy == "EDGE_MUTATE":
+        decoy_strategy = DecoyStrategy.EDGE_MUTATE
+    else:
+        raise NotImplementedError(f"Unknown decoy strategy {args.decoy_strategy}")
+
     fasta_file = args.fasta_file
     outfile = args.outfile
+    max_keep = args.max_ions
     pretty_outfile = f"{outfile}.pretty.json"
 
     # # outfile = "FUUUUU_small.ndjson"
@@ -314,7 +360,7 @@ def foo():
     # fasta_file = "/Users/sebastianpaez/fasta/20231030_UP000005640_9606.fasta"
     # # fasta_file = "/Users/sebastianpaez/git/timsseek/data/HeLa_cannonical_proteins.fasta"
     peps = get_human_peptides(fasta_file=fasta_file)
-    decoys = list(yield_as_decoys(peps))
+    decoys = list(yield_as_decoys(peps, decoy_strategy))
 
     pretty_outs = []
     is_first_n = 10
@@ -334,7 +380,7 @@ def foo():
             total=len(targ_use),
         ):
             id += 1
-            elem = as_entry(x[0], x[1], False, id)
+            elem = as_entry(x[0], x[1], False, id, max_keep=max_keep)
             if elem is None:
                 continue
             if is_first_n > 0:
@@ -358,7 +404,7 @@ def foo():
             total=len(dec_use),
         ):
             id += 1
-            elem = as_entry(x[0], x[1], True, id)
+            elem = as_entry(x[0], x[1], True, id, max_keep=max_keep)
             if elem is None:
                 continue
             if is_first_n > 0:

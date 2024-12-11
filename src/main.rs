@@ -207,19 +207,24 @@ fn main_loop<'a>(
     out_path: &Path,
 ) -> std::result::Result<(), TimsSeekError> {
     let mut chunk_num = 0;
+    let mut nqueries = 0;
+    let start = Instant::now();
 
     let style = ProgressStyle::with_template(
-        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}], {eta})",
+        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {eta})",
     )
     .unwrap();
     chunked_query_iterator
         .progress_with_style(style)
         .for_each(|chunk| {
             let out = process_chunk(chunk, &index, &factory, &tolerance);
+            nqueries += out.len();
             let out_path = out_path.join(format!("chunk_{}.csv", chunk_num));
             write_results_to_csv(&out, out_path).unwrap();
             chunk_num += 1;
         });
+    let elap_time = start.elapsed();
+    println!("Querying took {:?} for {} queries", elap_time, nqueries);
     Ok(())
 }
 
@@ -229,6 +234,18 @@ struct Cli {
     /// Path to the JSON configuration file
     #[arg(short, long)]
     config: PathBuf,
+
+    /// Path to the .d file (will over-write the config file)
+    #[arg(short, long)]
+    dotd_file: Option<PathBuf>,
+
+    /// Path to the speclib file (will over-write the config file)
+    #[arg(short, long)]
+    speclib_file: Option<PathBuf>,
+
+    /// Path to the output directory
+    #[arg(short, long)]
+    output_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -258,7 +275,7 @@ enum InputConfig {
 #[derive(Debug, Serialize, Deserialize)]
 struct AnalysisConfig {
     /// Path to the .d file
-    dotd_file: PathBuf,
+    dotd_file: Option<PathBuf>,
 
     /// Processing parameters
     chunk_size: usize,
@@ -325,7 +342,7 @@ fn process_fasta(
         max_missed_cleavages: digestion.max_missed_cleavages as usize,
     };
 
-    info!(
+    println!(
         "Digesting {} with parameters: \n {:?}",
         path.display(),
         digestion_params
@@ -338,7 +355,6 @@ fn process_fasta(
         .map(|x| x.sequence.clone())
         .collect();
 
-    let start = Instant::now();
     let digest_sequences: Vec<DigestSlice> =
         deduplicate_digests(digestion_params.digest_multiple(&sequences));
 
@@ -358,8 +374,6 @@ fn process_fasta(
         &analysis.tolerance,
         &output.directory,
     )?;
-    let elap_time = start.elapsed();
-    info!("Querying took {:?}", elap_time);
     Ok(())
 }
 
@@ -392,12 +406,23 @@ fn main() -> std::result::Result<(), TimsSeekError> {
 
     // Load and parse configuration
     let config: Result<Config, _> = serde_json::from_reader(std::fs::File::open(args.config)?);
-    let config = match config {
+    let mut config = match config {
         Ok(x) => x,
         Err(e) => {
             return Err(TimsSeekError::ParseError { msg: e.to_string() });
         }
     };
+    if let Some(dotd_file) = args.dotd_file {
+        config.analysis.dotd_file = Some(dotd_file);
+    }
+    if let Some(speclib_file) = args.speclib_file {
+        config.input = InputConfig::Speclib { path: speclib_file };
+    }
+    if let Some(output_dir) = args.output_dir {
+        config.output.directory = output_dir;
+    }
+
+    println!("{:?}", config);
 
     // Create output directory
     std::fs::create_dir_all(&config.output.directory)?;
@@ -405,6 +430,8 @@ fn main() -> std::result::Result<(), TimsSeekError> {
     let dotd_file_location = &config.analysis.dotd_file;
     let index = QuadSplittedTransposedIndex::from_path_centroided(
         dotd_file_location
+            .clone()
+            .unwrap() // TODO: Error handling
             .to_str()
             .expect("Path is not convertable to string"),
     )?;
